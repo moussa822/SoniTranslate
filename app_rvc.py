@@ -131,10 +131,10 @@ def warn_disp(wrn_lang, is_gui):
         gr.Warning(wrn_lang)
 
 class SoniTrCache:
-    # ... (le code de la classe SoniTrCache reste 100% identique, je ne le répète pas ici pour brevité)
+    # ... (ton code SoniTrCache reste 100% identique, je ne le répète pas ici)
 
 class SoniTranslate(SoniTrCache):
-    # ... (le __init__ et get_tts_voice_list restent identiques)
+    # ... (ton __init__ et get_tts_voice_list restent identiques)
 
     def multilingual_media_conversion(
         self,
@@ -151,16 +151,57 @@ class SoniTranslate(SoniTrCache):
         min_speakers=1,
         max_speakers=1,
         tts_voice00="en-US-EmmaMultilingualNeural-Female",
-        # ... (tous les autres paramètres TTS et autres restent identiques)
+        tts_voice01="en-US-AndrewMultilingualNeural-Male",
+        tts_voice02="en-US-AvaMultilingualNeural-Female",
+        tts_voice03="en-US-BrianMultilingualNeural-Male",
+        tts_voice04="de-DE-SeraphinaMultilingualNeural-Female",
+        tts_voice05="de-DE-FlorianMultilingualNeural-Male",
+        tts_voice06="fr-FR-VivienneMultilingualNeural-Female",
+        tts_voice07="fr-FR-RemyMultilingualNeural-Male",
+        tts_voice08="en-US-EmmaMultilingualNeural-Female",
+        tts_voice09="en-US-AndrewMultilingualNeural-Male",
+        tts_voice10="en-US-EmmaMultilingualNeural-Female",
+        tts_voice11="en-US-AndrewMultilingualNeural-Male",
+        video_output_name="",
+        mix_method_audio="Adjusting volumes and mixing audio",
+        max_accelerate_audio=2.1,
+        acceleration_rate_regulation=False,
+        volume_original_audio=0.25,
+        volume_translated_audio=1.80,
+        output_format_subtitle="srt",
+        get_translated_text=False,
+        get_video_from_text_json=False,
+        text_json="{}",
+        avoid_overlap=False,
+        vocal_refinement=False,
+        literalize_numbers=True,
+        segment_duration_limit=15,
         diarization_model="pyannote_2.1",
         translate_process="google_translator_batch",
-        # ... (tous les autres paramètres jusqu'à is_gui=False, progress=gr.Progress()),
-        diar_model_choice="pyannote (défaut - stable)",  # AJOUT NEVO : paramètre reçu du dropdown
+        subtitle_file=None,
+        output_type="video (mp4)",
+        voiceless_track=False,
+        voice_imitation=False,
+        voice_imitation_max_segments=3,
+        voice_imitation_vocals_dereverb=False,
+        voice_imitation_remove_previous=True,
+        voice_imitation_method="freevc",
+        dereverb_automatic_xtts=True,
+        text_segmentation_scale="sentence",
+        divide_text_segments_by="",
+        soft_subtitles_to_video=True,
+        burn_subtitles_to_video=False,
+        enable_cache=True,
+        custom_voices=False,
+        custom_voices_workers=1,
+        is_gui=False,
+        progress=gr.Progress(),
+        diar_model_choice="pyannote (défaut - stable)",  # ← AJOUT : reçu depuis l'interface
     ):
-        # AJOUT NEVO : décision simple si on utilise NeMo ou pyannote
+        # AJOUT : décision simple si on utilise NeMo ou pyannote
         use_nemo = "nemo" in str(diar_model_choice).lower()
 
-        # ... (tout le code jusqu'à l'appel à diarize_speech reste identique)
+        # ... (tout le code jusqu'à la partie diarization reste identique)
 
         if not self.task_in_cache("diarize", [
             min_speakers,
@@ -177,15 +218,15 @@ class SoniTranslate(SoniTrCache):
                 max_speakers,
                 YOUR_HF_TOKEN,
                 diarize_model_select,
-                use_nemo=use_nemo  # AJOUT NEVO : on passe le flag ici !
+                use_nemo=use_nemo  # ← AJOUT : on passe le flag ici !
             )
             logger.debug("Diarize complete")
 
-        # ... (le reste de la fonction reste 100% identique jusqu'à la fin)
+        # ... (le reste de la fonction multilingual_media_conversion reste 100% identique)
 
-    # ... (les autres méthodes comme hook_beta_processor et multilingual_docs_conversion restent identiques)
+    # ... (les autres méthodes comme batch_multilingual_media_conversion, hook_beta_processor, multilingual_docs_conversion restent identiques)
 
-# AJOUT NEVO : choix pour le dropdown
+# AJOUT : choix pour le dropdown
 DIARIZATION_CHOICES = [
     "pyannote (défaut - stable)",
     "nemo (plus puissant sur overlaps & longs audios)"
@@ -193,7 +234,8 @@ DIARIZATION_CHOICES = [
 
 def create_gui(theme, logs_in_gui=False):
     with gr.Blocks(theme=theme) as app:
-        # ... (markdown et tabs existants)
+        gr.Markdown(title)
+        gr.Markdown(lg_conf["description"])
 
         with gr.Tab(lg_conf["tab_translate"]):
             with gr.Row():
@@ -201,32 +243,85 @@ def create_gui(theme, logs_in_gui=False):
                     # ... (tous les inputs vidéo, langues, speakers, TTS, etc. restent identiques)
 
                     with gr.Accordion(lg_conf["extra_setting"], open=False):
-                        # ... (les sliders et options existantes)
+                        # ... (tous les sliders et options existantes restent identiques)
 
-                        # AJOUT NEVO : dropdown pour choisir pyannote ou NeMo
+                        # AJOUT : dropdown pour choisir pyannote ou NeMo
                         diar_model_choice = gr.Dropdown(
                             choices=DIARIZATION_CHOICES,
                             value=DIARIZATION_CHOICES[0],  # pyannote par défaut
-                            label="Modèle de diarisation (locuteurs)",
-                            info="pyannote = rapide et stable\nNeMo = meilleur pour voix qui se chevauchent",
+                            label="Modèle de diarisation des locuteurs",
+                            info="pyannote : rapide et stable\nNeMo : meilleur pour chevauchements de voix et audios longs",
                             interactive=True,
                         )
 
-                        # ... (le reste de l'accordéon : text_segmentation, etc.)
+                        # ... (le reste de l'accordéon : text_segmentation_scale_gui, etc. reste identique)
 
-                    # ... (edit_sub_check, boutons, etc.)
+                    # ... (edit_sub_check, boutons, etc. restent identiques)
 
         # ... (les autres tabs : docs, custom voice, help restent identiques)
 
-        # Mise à jour des .click() pour inclure le nouveau paramètre
+        # Mise à jour des boutons pour passer le nouveau paramètre
         video_button.click(
             SoniTr.batch_multilingual_media_conversion,
             inputs=[
-                # ... tous les inputs précédents (video_input, HFKEY, etc.)
+                video_input,
+                blink_input,
+                directory_input,
+                HFKEY,
+                PREVIEW,
+                WHISPER_MODEL_SIZE,
+                batch_size,
+                compute_type,
+                SOURCE_LANGUAGE,
+                TRANSLATE_AUDIO_TO,
+                min_speakers,
+                max_speakers,
+                tts_voice00,
+                tts_voice01,
+                tts_voice02,
+                tts_voice03,
+                tts_voice04,
+                tts_voice05,
+                tts_voice06,
+                tts_voice07,
+                tts_voice08,
+                tts_voice09,
+                tts_voice10,
+                tts_voice11,
+                VIDEO_OUTPUT_NAME,
+                AUDIO_MIX,
+                audio_accelerate,
+                acceleration_rate_regulation_gui,
+                volume_original_mix,
+                volume_translated_mix,
+                sub_type_output,
+                dummy_false_check,
+                edit_sub_check,
+                subs_edit_space,
+                avoid_overlap_gui,
+                vocal_refinement_gui,
+                literalize_numbers_gui,
+                segment_duration_limit_gui,
+                diarization_process_dropdown,
+                translate_process_dropdown,
+                input_srt,
+                main_output_type,
+                main_voiceless_track,
+                voice_imitation_gui,
+                voice_imitation_max_segments_gui,
+                voice_imitation_vocals_dereverb_gui,
+                voice_imitation_remove_previous_gui,
+                voice_imitation_method_gui,
+                wav_speaker_dereverb,
+                text_segmentation_scale_gui,
+                divide_text_segments_by_gui,
+                soft_subtitles_to_video_gui,
+                burn_subtitles_to_video_gui,
+                enable_cache_gui,
                 enable_custom_voice,
                 workers_custom_voice,
                 is_gui_dummy_check,
-                diar_model_choice,           # AJOUT NEVO : dernier input !
+                diar_model_choice,  # ← AJOUT : dernier input pour le choix diarisation !
             ],
             outputs=video_output,
             trigger_mode="multiple",
@@ -237,7 +332,7 @@ def create_gui(theme, logs_in_gui=False):
         subs_button.click(
             SoniTr.batch_multilingual_media_conversion,
             inputs=[
-                # ... même liste que ci-dessus, plus le nouveau
+                # ... même liste que ci-dessus, avec diar_model_choice en dernier
                 diar_model_choice,
             ],
             outputs=subs_edit_space,
@@ -245,8 +340,8 @@ def create_gui(theme, logs_in_gui=False):
             play_sound_alert, [play_sound_gui], [sound_alert_notification]
         )
 
-        # ... (docs_button et le reste restent identiques)
+        # ... (le reste du code : docs_button, etc. reste identique)
 
     return app
 
-# ... (le reste du fichier : get_language_config, create_parser, if __name__ == "__main__" reste identique)
+# ... (le reste du fichier : get_language_config, create_parser, if __name__ == "__main__" reste 100% identique)
