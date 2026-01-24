@@ -452,6 +452,14 @@ class SoniTranslate(SoniTrCache):
             or "OpenAI-TTS" in tts_voice00
         ):
             check_openai_api_key()
+            
+        # --- AJOUT POUR GEMINI ET GROQ ---
+        if "gemini" in translate_process.lower() and not os.environ.get("GOOGLE_API_KEY"):
+            raise ValueError("Erreur : La clé API Google (Gemini) est manquante. Assurez-vous de définir la variable d'environnement GOOGLE_API_KEY.")
+            
+        if "groq" in translate_process.lower() and not os.environ.get("GROQ_API_KEY"):
+            raise ValueError("Erreur : La clé API Groq est manquante. Assurez-vous de définir la variable d'environnement GROQ_API_KEY.")
+        # ---------------------------------
 
         if media_file is None:
             media_file = (
@@ -2862,3 +2870,4 @@ if __name__ == "__main__":
         quiet=False,
         debug=(True if logger.isEnabledFor(logging.DEBUG) else False),
     )
+
