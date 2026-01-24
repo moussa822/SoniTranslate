@@ -13,6 +13,8 @@ TRANSLATION_PROCESS_OPTIONS = [
     "google_translator",
     "gpt-3.5-turbo-0125_batch",
     "gpt-3.5-turbo-0125",
+    "gemini_pro",
+    "groq_llama3",
     "gpt-4-turbo-preview_batch",
     "gpt-4-turbo-preview",
     "disable_translation",
@@ -20,6 +22,8 @@ TRANSLATION_PROCESS_OPTIONS = [
 DOCS_TRANSLATION_PROCESS_OPTIONS = [
     "google_translator",
     "gpt-3.5-turbo-0125",
+    "groq_llama3",
+    "gemini_pro",
     "gpt-4-turbo-preview",
     "disable_translation",
 ]
@@ -318,7 +322,114 @@ def gpt_sequential(segments, model, target, source=None):
     return translated_segments
 
 
-def gpt_batch(segments, model, target, token_batch_limit=900, source=None):
+# ==========================================
+# NOUVELLES FONCTIONS GEMINI ET GROQ
+# ==========================================
+
+def gemini_translate(segments, target, source=None):
+    import google.generativeai as genai
+    import os
+    
+    # Configuration de l'API
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        logger.error("Erreur: Clé API Google (Gemini) manquante.")
+        return segments
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-pro')
+    
+    translated_segments = copy.deepcopy(segments)
+    progress_bar = tqdm(total=len(segments), desc="Translating with Gemini")
+    
+    # Nettoyage des codes langues pour l'affichage
+    lang_tg = re.sub(r'\([^)]*\)', '', INVERTED_LANGUAGES[target]).strip()
+    
+    for i, line in enumerate(translated_segments):
+        text = line["text"].strip()
+        
+        # Prompt simple et efficace
+        prompt = f"Translate the following text into {lang_tg}. Output only the translated text, nothing else:\n\n{text}"
+        
+        try:
+            response = model.generate_content(prompt)
+            # Vérification si la réponse est valide
+            if response.text:
+                translated_segments[i]["text"] = response.text.strip()
+            else:
+                raise ValueError("Réponse vide de Gemini")
+                
+        except Exception as e:
+            logger.error(f"Gemini Error on segment {i}: {e}. Switching to Google Translate fallback.")
+            # Fallback (Secours) sur Google Translate classique si Gemini échoue
+            try:
+                translator = GoogleTranslator(source='auto', target=fix_code_language(target))
+                translated_segments[i]["text"] = translator.translate(text).strip()
+            except:
+                pass # Si tout échoue, on garde l'original
+                
+        progress_bar.update(1)
+        time.sleep(0.5) # Petite pause pour éviter de bloquer l'API (Rate limit)
+        
+    progress_bar.close()
+    return translated_segments
+
+
+def groq_translate(segments, target, source=None):
+    from openai import OpenAI # Groq est compatible avec le client OpenAI
+    import os
+    
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        logger.error("Erreur: Clé API Groq manquante.")
+        return segments
+
+    # On pointe vers les serveurs de Groq
+    client = OpenAI(
+        base_url="https://api.groq.com/openai/v1",
+        api_key=api_key
+    )
+    
+    translated_segments = copy.deepcopy(segments)
+    progress_bar = tqdm(total=len(segments), desc="Translating with Groq (Llama3)")
+    
+    lang_tg = re.sub(r'\([^)]*\)', '', INVERTED_LANGUAGES[target]).strip()
+
+    for i, line in enumerate(translated_segments):
+        text = line["text"].strip()
+        
+        system_prompt = f"You are a professional translator. Translate the text to {lang_tg}. Output ONLY the translation."
+        
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text}
+                ],
+                model="llama3-70b-8192", # Modèle très puissant et rapide
+                temperature=0.3,
+            )
+            
+            translated_text = chat_completion.choices[0].message.content
+            translated_segments[i]["text"] = translated_text.strip()
+
+        except Exception as e:
+            logger.error(f"Groq Error on segment {i}: {e}. Switching to Google Translate fallback.")
+            # Fallback (Secours)
+            try:
+                translator = GoogleTranslator(source='auto', target=fix_code_language(target))
+                translated_segments[i]["text"] = translator.translate(text).strip()
+            except:
+                pass
+
+        progress_bar.update(1)
+        # Groq est très rapide, pas besoin de sleep généralement, mais on reste prudent
+        
+    progress_bar.close()
+    
+    return translated_segments
+    
+    def gpt_batch(segments, model, target, token_batch_limit=900, source=None):
     from openai import OpenAI
     import tiktoken
 
