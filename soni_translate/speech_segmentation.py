@@ -359,41 +359,36 @@ def diarize_speech(
     model_name="pyannote/speaker-diarization@2.1",
 ):
     """
-    Fonction Diarisation BLINDÉE pour éviter les erreurs de Token.
+    Performs speaker diarization on speech segments.
+
+    Parameters:
+    - audio_wav (array): Audio data in WAV format to perform speaker
+        diarization.
+    - result (dict): Metadata containing information about speech segments
+        and alignments.
+    - min_speakers (int): Minimum number of speakers expected in the audio.
+    - max_speakers (int): Maximum number of speakers expected in the audio.
+    - YOUR_HF_TOKEN (str): Your Hugging Face API token for model
+        authentication.
+    - model_name (str): Name of the speaker diarization model to be used
+        (default: "pyannote/speaker-diarization@2.1").
+
+    Returns:
+    - result_diarize (dict): Updated metadata after assigning speaker
+        labels to segments.
+
+    Notes:
+    - This function utilizes a speaker diarization model to label speaker
+        segments in the audio.
+    - It assigns speakers to word-level segments based on diarization results.
+    - Cleans up memory by releasing resources after diarization.
+    - If only one speaker is specified, each segment is automatically assigned
+        as the first speaker, eliminating the need for diarization inference.
     """
-    import os
-    import gc
-    import torch
-    from soni_translate.speech_segmentation import diarization_models
-    import whisperx
-
-    # --- ETAPE 1 : RECUPERATION DU TOKEN (Priorité à l'environnement) ---
-    # Si le token passé est vide ou juste des espaces, on prend celui du système
-    if not YOUR_HF_TOKEN or str(YOUR_HF_TOKEN).strip() == "":
-        YOUR_HF_TOKEN = os.environ.get("YOUR_HF_TOKEN")
-    
-    # On nettoie le token (enlève les espaces à la fin qui font planter)
-    if YOUR_HF_TOKEN:
-        YOUR_HF_TOKEN = str(YOUR_HF_TOKEN).strip()
-    # -------------------------------------------------------------------
-
-    # --- ETAPE 2 : LOGIN FORCE (La méthode radicale) ---
-    # Parfois whisperx n'arrive pas à lire le token, alors on connecte tout le python.
-    if YOUR_HF_TOKEN:
-        try:
-            from huggingface_hub import login
-            print(f">> TENTATIVE DE LOGIN HF avec token commençant par {YOUR_HF_TOKEN[:4]}...")
-            login(token=YOUR_HF_TOKEN)
-            print(">> LOGIN HF REUSSI ✅")
-        except Exception as e:
-            print(f">> Attention: Le login HF manuel a échoué ({e}), on continue quand même...")
-    else:
-        print(">> ERREUR CRITIQUE : Aucun Token HF trouvé dans os.environ ni dans les arguments ❌")
-    # ---------------------------------------------------
 
     if max(min_speakers, max_speakers) > 1 and model_name:
         try:
-            # On lance le pipeline
+
             diarize_model = whisperx.DiarizationPipeline(
                 model_name=model_name,
                 use_auth_token=YOUR_HF_TOKEN,
@@ -403,30 +398,50 @@ def diarize_speech(
         except Exception as error:
             error_str = str(error)
             gc.collect()
-            torch.cuda.empty_cache()
-            
-            # Gestion précise des erreurs pour t'aider à débugger
-            if "'NoneType' object has no attribute 'to'" in error_str or "401" in error_str or "gated" in error_str:
+            torch.cuda.empty_cache()  # noqa
+            if "'NoneType' object has no attribute 'to'" in error_str:
                 if model_name == diarization_models["pyannote_2.1"]:
                     raise ValueError(
-                        "ERREUR LICENCE 2.1 : Tu dois accepter la licence ici : "
+                        "Accept the license agreement for using Pyannote 2.1."
+                        " You need to have an account on Hugging Face and "
+                        "accept the license to use the models: "
                         "https://huggingface.co/pyannote/speaker-diarization "
-                        "et ici : https://huggingface.co/pyannote/segmentation "
+                        "and https://huggingface.co/pyannote/segmentation "
+                        "Get your KEY TOKEN here: "
+                        "https://hf.co/settings/tokens "
                     )
                 elif model_name == diarization_models["pyannote_3.1"]:
                     raise ValueError(
-                        "ERREUR LICENCE 3.1 / TOKEN : "
-                        "1. Ton Token est-il bien en mode READ (Lecture) ? "
-                        "2. As-tu accepté la licence ici ? https://huggingface.co/pyannote/speaker-diarization-3.1 "
-                        "3. Et ici ? https://huggingface.co/pyannote/segmentation-3.0 "
+                        "New Licence Pyannote 3.1: You need to have an account"
+                        " on Hugging Face and accept the license to use the "
+                        "models: https://huggingface.co/pyannote/speaker-diarization-3.1 " # noqa
+                        "and https://huggingface.co/pyannote/segmentation-3.0 "
                     )
             else:
-                # Si c'est une autre erreur, on l'affiche
                 raise error
-
         diarize_segments = diarize_model(
             audio_wav, min_speakers=min_speakers, max_speakers=max_speakers
         )
-        return diarize_segments
-    
-    return None
+
+        result_diarize = whisperx.assign_word_speakers(
+            diarize_segments, result
+        )
+
+        for segment in result_diarize["segments"]:
+            if "speaker" not in segment:
+                segment["speaker"] = "SPEAKER_00"
+                logger.warning(
+                    f"No speaker detected in {segment['start']}. First TTS "
+                    f"will be used for the segment text: {segment['text']} "
+                )
+
+        del diarize_model
+        gc.collect()
+        torch.cuda.empty_cache()  # noqa
+    else:
+        result_diarize = result
+        result_diarize["segments"] = [
+            {**item, "speaker": "SPEAKER_00"}
+            for item in result_diarize["segments"]
+        ]
+    return reencode_speakers(result_diarize)
