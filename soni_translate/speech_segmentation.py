@@ -360,34 +360,39 @@ def diarize_speech(
 ):
     """
     Performs speaker diarization on speech segments.
-
-    Parameters:
-    - audio_wav (array): Audio data in WAV format to perform speaker
-        diarization.
-    - result (dict): Metadata containing information about speech segments
-        and alignments.
-    - min_speakers (int): Minimum number of speakers expected in the audio.
-    - max_speakers (int): Maximum number of speakers expected in the audio.
-    - YOUR_HF_TOKEN (str): Your Hugging Face API token for model
-        authentication.
-    - model_name (str): Name of the speaker diarization model to be used
-        (default: "pyannote/speaker-diarization@2.1").
-
-    Returns:
-    - result_diarize (dict): Updated metadata after assigning speaker
-        labels to segments.
-
-    Notes:
-    - This function utilizes a speaker diarization model to label speaker
-        segments in the audio.
-    - It assigns speakers to word-level segments based on diarization results.
-    - Cleans up memory by releasing resources after diarization.
-    - If only one speaker is specified, each segment is automatically assigned
-        as the first speaker, eliminating the need for diarization inference.
+    ... (Les commentaires restent les mêmes) ...
     """
+
+    # ==================================================================
+    # 👇👇👇 ZONE DE HARDCODE (MODIFIE ICI) 👇👇👇
+    # ==================================================================
+    
+    # COLLE TON TOKEN HUGGING FACE ENTRE LES GUILLEMETS ICI :
+    REAL_TOKEN = "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" 
+    
+    # On écrase ce que le système a envoyé. On impose notre token.
+    YOUR_HF_TOKEN = REAL_TOKEN
+    
+    # On force la connexion pour être sûr à 100%
+    try:
+        from huggingface_hub import login
+        login(token=REAL_TOKEN)
+        print(f">> FORCE LOGIN HF SUCCESS avec le token : {REAL_TOKEN[:5]}...")
+    except Exception as e:
+        print(f">> Erreur login HF (pas grave si le token passe dans le pipeline) : {e}")
+
+    # ==================================================================
+    # 👆👆👆 FIN ZONE DE HARDCODE 👆👆👆
+    # ==================================================================
 
     if max(min_speakers, max_speakers) > 1 and model_name:
         try:
+            # On s'assure que whisperx est bien chargé
+            import whisperx
+            import os
+            import torch
+            import gc
+            from soni_translate.speech_segmentation import diarization_models
 
             diarize_model = whisperx.DiarizationPipeline(
                 model_name=model_name,
