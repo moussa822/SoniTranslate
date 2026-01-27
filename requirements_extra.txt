@@ -1,4 +1,6 @@
 praat-parselmouth>=0.4.3
+google-generativeai
+groq
 pyworld==0.3.2
 faiss-cpu==1.7.3
 torchcrepe==0.0.20
