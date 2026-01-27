@@ -1,4 +1,5 @@
 google-generativeai
+groq
 ctranslate2<=4.4.0
 yt-dlp
 gradio==4.19.2
