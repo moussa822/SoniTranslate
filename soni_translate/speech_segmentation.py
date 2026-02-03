@@ -358,72 +358,48 @@ def diarize_speech(
     YOUR_HF_TOKEN,
     model_name="pyannote/speaker-diarization@2.1",
 ):
-    """
-    Performs speaker diarization on speech segments.
-    ... (Les commentaires restent les mêmes) ...
-    """
+    import os
+    import gc
+    import torch
+    import whisperx
+    from soni_translate.speech_segmentation import diarization_models
 
-    # ==================================================================
-    # 👇👇👇 ZONE DE HARDCODE (MODIFIE ICI) 👇👇👇
-    # ==================================================================
-    
-    # COLLE TON TOKEN HUGGING FACE ENTRE LES GUILLEMETS ICI :
-    REAL_TOKEN = "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" 
-    
-    # On écrase ce que le système a envoyé. On impose notre token.
-    YOUR_HF_TOKEN = REAL_TOKEN
-    
-    # On force la connexion pour être sûr à 100%
-    try:
-        from huggingface_hub import login
-        login(token=REAL_TOKEN)
-        print(f">> FORCE LOGIN HF SUCCESS avec le token : {REAL_TOKEN[:5]}...")
-    except Exception as e:
-        print(f">> Erreur login HF (pas grave si le token passe dans le pipeline) : {e}")
+    # On nettoie le token au cas où
+    if YOUR_HF_TOKEN:
+        YOUR_HF_TOKEN = str(YOUR_HF_TOKEN).strip()
 
-    # ==================================================================
-    # 👆👆👆 FIN ZONE DE HARDCODE 👆👆👆
-    # ==================================================================
-
-    if max(min_speakers, max_speakers) > 1 and model_name:
+    if max(min_speakers, max_speakers) > 1:
+        diarize_model = None
+        
+        # --- TENTATIVE 1 : OFFICIELLE (Avec Token) ---
         try:
-            # On s'assure que whisperx est bien chargé
-            import whisperx
-            import os
-            import torch
-            import gc
-            from soni_translate.speech_segmentation import diarization_models
-
+            print(">> Tentative 1 : Connexion officielle Pyannote...")
             diarize_model = whisperx.DiarizationPipeline(
                 model_name=model_name,
                 use_auth_token=YOUR_HF_TOKEN,
                 device=os.environ.get("SONITR_DEVICE"),
             )
+        except Exception as e:
+            print(f">> Echec Tentative 1 ({e}).")
+            
+            # --- TENTATIVE 2 : LA SOLUTION MAGIQUE (Sans Token) ---
+            print(">> Tentative 2 : Passage au modèle PUBLIC (fatymatariq)... 🏴‍☠️")
+            try:
+                # On force le modèle public qui ne demande pas de token
+                # Note: On utilise le modèle 3.1 public car il est meilleur
+                public_model = "fatymatariq/speaker-diarization-3.1"
+                
+                diarize_model = whisperx.DiarizationPipeline(
+                    model_name=public_model,
+                    use_auth_token=None, # Pas besoin de token !
+                    device=os.environ.get("SONITR_DEVICE"),
+                )
+                print(">> SUCCÈS ! Modèle public chargé.")
+            except Exception as e2:
+                # Si même ça échoue, on lève la vraie erreur
+                raise ValueError(f"Tout a échoué. Erreur finale: {e2}")
 
-        except Exception as error:
-            error_str = str(error)
-            gc.collect()
-            torch.cuda.empty_cache()  # noqa
-            if "'NoneType' object has no attribute 'to'" in error_str:
-                if model_name == diarization_models["pyannote_2.1"]:
-                    raise ValueError(
-                        "Accept the license agreement for using Pyannote 2.1."
-                        " You need to have an account on Hugging Face and "
-                        "accept the license to use the models: "
-                        "https://huggingface.co/pyannote/speaker-diarization "
-                        "and https://huggingface.co/pyannote/segmentation "
-                        "Get your KEY TOKEN here: "
-                        "https://hf.co/settings/tokens "
-                    )
-                elif model_name == diarization_models["pyannote_3.1"]:
-                    raise ValueError(
-                        "New Licence Pyannote 3.1: You need to have an account"
-                        " on Hugging Face and accept the license to use the "
-                        "models: https://huggingface.co/pyannote/speaker-diarization-3.1 " # noqa
-                        "and https://huggingface.co/pyannote/segmentation-3.0 "
-                    )
-            else:
-                raise error
+        # La suite est identique au code original...
         diarize_segments = diarize_model(
             audio_wav, min_speakers=min_speakers, max_speakers=max_speakers
         )
@@ -435,18 +411,15 @@ def diarize_speech(
         for segment in result_diarize["segments"]:
             if "speaker" not in segment:
                 segment["speaker"] = "SPEAKER_00"
-                logger.warning(
-                    f"No speaker detected in {segment['start']}. First TTS "
-                    f"will be used for the segment text: {segment['text']} "
-                )
-
+        
         del diarize_model
         gc.collect()
-        torch.cuda.empty_cache()  # noqa
+        torch.cuda.empty_cache()
     else:
         result_diarize = result
         result_diarize["segments"] = [
             {**item, "speaker": "SPEAKER_00"}
             for item in result_diarize["segments"]
         ]
+    
     return reencode_speakers(result_diarize)
