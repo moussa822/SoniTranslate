@@ -331,24 +331,23 @@ diarization_models = {
 
 
 def reencode_speakers(result):
-
-    if result["segments"][0]["speaker"] == "SPEAKER_00":
-        return result
-
     speaker_mapping = {}
     counter = 0
-
-    logger.debug("Reencode speakers")
+    
+    # On enlève la vérification du début pour forcer le nettoyage
+    # logger.debug("Reencode speakers") (Optionnel)
 
     for segment in result["segments"]:
-        old_speaker = segment["speaker"]
+        # On utilise .get() pour éviter le crash si la clé manque
+        old_speaker = segment.get("speaker", "SPEAKER_00")
+        
         if old_speaker not in speaker_mapping:
             speaker_mapping[old_speaker] = f"SPEAKER_{counter:02d}"
             counter += 1
+            
         segment["speaker"] = speaker_mapping[old_speaker]
 
     return result
-
 
 def diarize_speech(
     audio_wav,
