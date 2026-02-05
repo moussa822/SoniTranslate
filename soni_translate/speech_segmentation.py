@@ -420,5 +420,16 @@ def diarize_speech(
             {**item, "speaker": "SPEAKER_00"}
             for item in result_diarize["segments"]
         ]
+        # ... fin du code de diarisation ...
+
+        # --- DEBUG A AJOUTER ICI ---
+        liste_speakers = set()
+        for seg in result_diarize["segments"]:
+            if "speaker" in seg:
+                liste_speakers.add(seg["speaker"])
+        
+        print(f"\n📢 BILAN IA : {len(liste_speakers)} voix détectées.")
+        print(f"📢 QUI SONT-ILS ? : {liste_speakers}")
+        # ---------------------------
     
     return reencode_speakers(result_diarize)
