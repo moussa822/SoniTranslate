@@ -1,4 +1,4 @@
-google-generativeai
+google-genai
 groq
 ctranslate2<=4.4.0
 yt-dlp
