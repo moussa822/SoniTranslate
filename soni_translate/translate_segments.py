@@ -9,7 +9,7 @@ import json
 import time
 import os
 
-# --- IMPORTS AVEC GESTION D'ERREUR ---
+# --- GESTION DES IMPORTS ---
 try:
     import google.generativeai as genai
     from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -20,7 +20,7 @@ try:
     from openai import OpenAI
 except ImportError:
     pass
-# -------------------------------------
+# ---------------------------
 
 TRANSLATION_PROCESS_OPTIONS = [
     "google_translator_batch",
@@ -29,8 +29,8 @@ TRANSLATION_PROCESS_OPTIONS = [
     "gpt-3.5-turbo-0125",
     "gpt-4-turbo-preview_batch",
     "gpt-4-turbo-preview",
-    "gemini_pro",          
-    "groq_llama3",         
+    "gemini_pro",          # Notre Star
+    "groq_llama3",         # Notre Turbo
     "disable_translation",
 ]
 
@@ -45,7 +45,7 @@ DOCS_TRANSLATION_PROCESS_OPTIONS = [
 
 
 def translate_iterative(segments, target, source=None):
-    """Fallback : Traduction Google classique mot à mot"""
+    """Fallback de secours (Google Traduction classique)"""
     segments_ = copy.deepcopy(segments)
     if not source: source = "auto"
     translator = GoogleTranslator(source=source, target=target)
@@ -69,7 +69,7 @@ def verify_translate(segments, segments_copy, translated_lines, target, source):
 
 
 def translate_batch(segments, target, chunk_size=2000, source=None):
-    """Traduction Google par blocs (Rapide)"""
+    """Traduction par lot Google (Rapide mais basique)"""
     segments_copy = copy.deepcopy(segments)
     if not source: source = "auto"
     text_lines = [seg["text"].strip() for seg in segments_copy]
@@ -121,24 +121,21 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
 
 
 # ==============================================================================
-# 🔥 GEMINI 2.0 - MODE DOUBLAGE FLUIDE
+# 🔥 GEMINI PRO 2.0 (DOUBLAGE FLUIDE & SANS CENSURE)
 # ==============================================================================
 
 def gemini_translate(segments, target, source=None):
-    # 1. RECUPERATION DE LA CLE
     api_key = os.environ.get("GOOGLE_API_KEY")
-    
     if not api_key:
-        api_key = "" # <--- Colle ta clé ici si besoin
-        
+        api_key = "AIzaSyDvzGjD5ZsvjUlfpd8CcY1ygm_N04OraXY"
     if not api_key:
-        logger.error("❌ GEMINI: Clé manquante ! (Vérifie la case dans Colab)")
+        logger.error("❌ GEMINI: Clé manquante ! Passage à Google Trad.")
         return translate_iterative(segments, target, source)
 
     try:
         genai.configure(api_key=api_key)
         
-        # 2. DESACTIVER LA CENSURE (Pour ne pas bloquer sur des films d'action)
+        # 1. STOP CENSURE (Crucial pour les films)
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -146,31 +143,20 @@ def gemini_translate(segments, target, source=None):
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
         
-        # 3. CONFIGURATION DU CERVEAU (DOUBLAGE)
-        # On utilise Gemini 2.0 Flash (Le plus récent) ou 1.5 Pro (Le plus intelligent)
-        # Note: Si 2.0 n'est pas dispo sur ton compte, remplace par 'gemini-1.5-pro'
-        model_name = 'gemini-2.0-flash-exp' 
-        
-        system_instruction = """
-        You are an expert Dubbing Translator. 
-        Your goal is to translate subtitles to sound natural and fluid when spoken.
-        - Do not translate word-for-word. Focus on the meaning and tone.
-        - Use conversational language (spoken style), not formal written style.
-        - Keep the sentence length roughly similar to the original to match the timing.
-        - Do not add explanations or notes. Just the translation.
-        """
-
+        # 2. CERVEAU DOUBLAGE
+        # On utilise le modèle Flash Exp (2.0) pour la vitesse et l'intelligence
+        # Si ça plante (accès refusé), remets 'gemini-1.5-pro'
         model = genai.GenerativeModel(
-            model_name=model_name, 
+            model_name='gemini-2.0-flash-exp', 
             safety_settings=safety_settings,
-            system_instruction=system_instruction
+            system_instruction="You are an expert Dubbing Translator. Your translations must be fluid, natural, and spoken-style. Do not be literal."
         )
     except Exception as e:
         logger.error(f"❌ GEMINI Config Error: {e}")
         return translate_iterative(segments, target, source)
 
     translated_segments = copy.deepcopy(segments)
-    progress_bar = tqdm(total=len(segments), desc="Translating (Gemini 2.0 Fluid)")
+    progress_bar = tqdm(total=len(segments), desc="Translating (Gemini Fluid)")
     
     lang_tg = re.sub(r'\([^)]*\)', '', INVERTED_LANGUAGES.get(target, target)).strip()
 
@@ -178,10 +164,9 @@ def gemini_translate(segments, target, source=None):
         text = line["text"].strip()
         if not text: continue
         
-        # 4. PROMPT RENFORCÉ POUR LA FLUIDITÉ
-        prompt = f"""
-        Translate the following line to {lang_tg} for audio dubbing.
-        Make it sound natural, fluid, and conversational.
+        # 3. PROMPT DE FLUIDITÉ
+        prompt = f"""Translate this line to {lang_tg} for audio dubbing.
+        Make it sound natural and conversational.
         Original: "{text}"
         Translation:"""
         
@@ -189,17 +174,17 @@ def gemini_translate(segments, target, source=None):
             response = model.generate_content(prompt)
             
             if response and response.text:
-                # Nettoyage
                 clean_text = response.text.replace("Translation:", "").replace('"', '').strip()
                 translated_segments[i]["text"] = clean_text
             else:
+                # Fallback immédiat si réponse vide
                 logger.warning(f"⚠️ Gemini réponse vide pour : {text}")
-                # Fallback Google
                 tr = GoogleTranslator(source='auto', target=fix_code_language(target))
                 translated_segments[i]["text"] = tr.translate(text).strip()
                 
         except Exception as e:
-            logger.error(f"❌ Erreur Gemini segment {i}: {e}")
+            # Fallback immédiat si erreur API
+            logger.error(f"❌ Erreur Gemini : {e}")
             try:
                 tr = GoogleTranslator(source='auto', target=fix_code_language(target))
                 translated_segments[i]["text"] = tr.translate(text).strip()
@@ -207,14 +192,14 @@ def gemini_translate(segments, target, source=None):
                 pass
         
         progress_bar.update(1)
-        time.sleep(0.1) 
+        time.sleep(0.1) # Vitesse max
 
     progress_bar.close()
     return translated_segments
 
 
 # ==============================================================================
-# 🚀 GROQ (Llama 3)
+# 🚀 GROQ (LLAMA 3) - RAPIDITÉ EXTRÊME
 # ==============================================================================
 
 def groq_translate(segments, target, source=None):
@@ -239,14 +224,14 @@ def groq_translate(segments, target, source=None):
         if not text: continue
 
         try:
-            # Prompt adapté aussi pour Groq
+            # Prompt adapté aussi pour la fluidité
             chat = client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": f"You are a dubbing translator. Translate to {lang_tg}. Make it sound natural and spoken. Output ONLY the translation."},
+                    {"role": "system", "content": f"You are a dubbing translator. Translate to {lang_tg}. Use spoken, natural language. Output ONLY the translation."},
                     {"role": "user", "content": text}
                 ],
                 model="llama3-70b-8192",
-                temperature=0.3, # Un peu plus de créativité pour la fluidité
+                temperature=0.3,
             )
             res = chat.choices[0].message.content
             if res:
@@ -264,8 +249,8 @@ def groq_translate(segments, target, source=None):
     progress_bar.close()
     return translated_segments
 
-# ------------------------------
 
+# --- FONCTIONS GPT (Simplifiées pour éviter les bugs) ---
 def gpt_sequential(segments, model, target, source=None):
     return translate_iterative(segments, target, source)
 
@@ -281,6 +266,7 @@ def translate_text(
     source=None,
     token_batch_limit=1000,
 ):
+    """Fonction principale"""
     target_clean = fix_code_language(target)
     source_clean = fix_code_language(source) if source else "auto"
 
@@ -289,12 +275,18 @@ def translate_text(
             return translate_batch(segments, target_clean, chunk_size, source_clean)
         case "google_translator":
             return translate_iterative(segments, target_clean, source_clean)
+        
+        # --- NOS MODÈLES ---
         case "gemini_pro":
             return gemini_translate(segments, target, source)
         case "groq_llama3":
             return groq_translate(segments, target, source)
+        # -------------------
+        
         case model if "gpt" in model:
+            # On redirige vers Google si quelqu'un choisit GPT par erreur
             return translate_iterative(segments, target_clean, source_clean)
+            
         case "disable_translation":
             return segments
         case _:
