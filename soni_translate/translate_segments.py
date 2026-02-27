@@ -9,31 +9,24 @@ import json
 import time
 import os
 
-# --- GESTION HYBRIDE DES LIBRAIRIES (V1 vs V2) ---
-# Cela permet au code de marcher peu importe ce que tu as dans requirements.txt
-USE_GENAI_V2 = False
+# --- IMPORTS MODERNES (SDK 2026) ---
 try:
     from google import genai
     from google.genai import types
-    USE_GENAI_V2 = True
 except ImportError:
-    try:
-        import google.generativeai as genai_v1
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-    except ImportError:
-        pass
+    pass 
 
 try:
     from openai import OpenAI
 except ImportError:
     pass
-# ------------------------------------------------
+# -----------------------------------
 
 TRANSLATION_PROCESS_OPTIONS = [
     "google_translator_batch",
     "google_translator",
-    "gpt-3.5-turbo-0125",
-    "gemini_flash",        # <--- Modèle Rapide & Econome
+    "gemini_flash",        # <--- Pointe vers gemini-flash-latest (V3)
+    "gemini_pro",          # <--- Pointe vers gemini-3.1-pro-preview
     "groq_llama3",         
     "disable_translation",
 ]
@@ -114,83 +107,76 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
 
 
 # ==============================================================================
-# ⚡ GEMINI FLASH (Version Économe & Fluide)
+# ⚡ GEMINI 3 FLASH / PRO (SDK V2)
 # ==============================================================================
 
-def gemini_translate(segments, target, source=None):
+def gemini_translate(segments, target, source=None, mode="flash"):
     api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key: api_key = "" # Fallback si besoin
+    if not api_key: api_key = "" 
 
     if not api_key:
         logger.error("❌ GEMINI: Clé manquante !")
         return translate_iterative(segments, target, source)
 
-    # Choix du modèle : 1.5 Flash est le meilleur ratio Vitesse/Prix/Qualité
-    model_id = "gemini-3-flash-preview" 
-    
-    # Instruction pour la fluidité (Language Naturel)
-    sys_instruction = "You are a professional Dubbing Translator. Translate subtitle lines into natural, spoken language. Keep it concise. Do not be literal. Do not censor."
+    # SELECTION DU MODELE ACTUEL (2026)
+    if mode == "pro":
+        model_id = "gemini-3.1-pro-preview" # Le plus puissant
+    else:
+        model_id = "gemini-flash-latest"    # Le plus rapide (Gemini 3 Flash)
+
+    try:
+        # Initialisation du client V2 (google-genai)
+        client = genai.Client(api_key=api_key)
+        
+        # Config V2 (Sécurité OFF + Instruction)
+        config = types.GenerateContentConfig(
+            safety_settings=[
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE")
+            ],
+            system_instruction="You are a professional Dubbing Translator. Translate naturally for spoken audio. Do not censor. Keep timing."
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ GEMINI V2 Config Error: {e}. As-tu installé 'google-genai' ?")
+        return translate_iterative(segments, target, source)
 
     translated_segments = copy.deepcopy(segments)
     progress_bar = tqdm(total=len(segments), desc=f"Translating ({model_id})")
+    
     lang_tg = re.sub(r'\([^)]*\)', '', INVERTED_LANGUAGES.get(target, target)).strip()
 
-    # --- LOGIQUE V2 (google-genai) ---
-    if USE_GENAI_V2:
+    for i, line in enumerate(translated_segments):
+        text = line["text"].strip()
+        if not text: continue
+        
+        prompt = f"Translate to {lang_tg} (Natural/Spoken):\n{text}"
+        
         try:
-            client = genai.Client(api_key=api_key)
-            config = types.GenerateContentConfig(
-                safety_settings=[
-                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE")
-                ],
-                system_instruction=sys_instruction
+            # Appel API V2
+            response = client.models.generate_content(
+                model=model_id,
+                contents=prompt,
+                config=config
             )
             
-            for i, line in enumerate(translated_segments):
-                text = line["text"].strip()
-                if not text: continue
-                prompt = f"Translate to {lang_tg} (Spoken Style):\n{text}"
-                try:
-                    response = client.models.generate_content(model=model_id, contents=prompt, config=config)
-                    if response.text: translated_segments[i]["text"] = response.text.strip()
-                except Exception as e:
-                    pass # Fallback silencieux
-                progress_bar.update(1)
+            if response.text:
+                translated_segments[i]["text"] = response.text.strip()
+            else:
+                tr = GoogleTranslator(source='auto', target=fix_code_language(target))
+                translated_segments[i]["text"] = tr.translate(text).strip()
                 
         except Exception as e:
-            logger.error(f"❌ Gemini V2 Error: {e}")
-            return translate_iterative(segments, target, source)
-
-    # --- LOGIQUE V1 (google.generativeai) - Au cas où ---
-    else:
-        try:
-            genai_v1.configure(api_key=api_key)
-            safety = {
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-            model = genai_v1.GenerativeModel(model_name=model_id, safety_settings=safety, system_instruction=sys_instruction)
-            
-            for i, line in enumerate(translated_segments):
-                text = line["text"].strip()
-                if not text: continue
-                prompt = f"Translate to {lang_tg} (Spoken Style):\n{text}"
-                try:
-                    response = model.generate_content(prompt)
-                    if response.text: translated_segments[i]["text"] = response.text.strip()
-                except Exception:
-                    pass
-                progress_bar.update(1)
-                time.sleep(0.1)
-                
-        except Exception as e:
-            logger.error(f"❌ Gemini V1 Error: {e}")
-            return translate_iterative(segments, target, source)
+            logger.error(f"❌ Erreur {model_id} segment {i}: {e}")
+            try:
+                tr = GoogleTranslator(source='auto', target=fix_code_language(target))
+                translated_segments[i]["text"] = tr.translate(text).strip()
+            except:
+                pass
+        
+        progress_bar.update(1)
 
     progress_bar.close()
     return translated_segments
@@ -217,7 +203,7 @@ def groq_translate(segments, target, source=None):
         try:
             chat = client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": f"You are a dubbing translator. Translate to {lang_tg}. Use natural spoken style. Output ONLY translation."},
+                    {"role": "system", "content": f"Translate to {lang_tg}. Natural spoken style. Output ONLY translation."},
                     {"role": "user", "content": text}
                 ],
                 model="llama3-70b-8192",
@@ -241,10 +227,16 @@ def translate_text(segments, target, translation_process="google_translator_batc
             return translate_batch(segments, target_clean, chunk_size, source_clean)
         case "google_translator":
             return translate_iterative(segments, target_clean, source_clean)
-        case "gemini_pro" | "gemini_flash" | "gemini_3_1": # Tout pointe vers Flash maintenant
-            return gemini_translate(segments, target, source)
+        
+        # --- NOUVEAUX CHOIX ---
+        case "gemini_flash":
+            return gemini_translate(segments, target, source, mode="flash") # Utilise gemini-flash-latest (V3)
+        case "gemini_pro":
+            return gemini_translate(segments, target, source, mode="pro")   # Utilise gemini-3.1-pro
         case "groq_llama3":
             return groq_translate(segments, target, source)
+        # ----------------------
+        
         case model if "gpt" in model:
             return translate_iterative(segments, target_clean, source_clean) 
         case "disable_translation":
