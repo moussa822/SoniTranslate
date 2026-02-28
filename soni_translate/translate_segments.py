@@ -115,11 +115,19 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
 def gemini_translate(segments, target, source=None, mode="flash"):
     """Traduction Gemini Flash ou Pro - SDK officiel 2026"""
     
-    # 1. Clé API
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("❌ GEMINI: GOOGLE_API_KEY ou GEMINI_API_KEY manquante !")
+    # ==================== CLÉ API MANUELLE ====================
+    api_key = "ta_clé_gemini_ici_colle_la_entière"   # ←←← METS TA CLÉ ICI
+    
+    # (Optionnel) Garde aussi la version environnement au cas où
+    # api_key = api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    
+    if not api_key or len(api_key) < 30:   # petite vérif de sécurité
+        logger.error("❌ GEMINI: Tu as oublié de mettre ta vraie clé Gemini !")
         return translate_iterative(segments, target, source)
+    # ==========================================================
+
+    # Le reste de la fonction reste EXACTEMENT pareil (le code que je t’ai donné avant)
+    # ... (à partir de "if mode == "pro":" jusqu’à la fin)
 
     # 2. Choix du modèle
     if mode == "pro":
