@@ -22,6 +22,10 @@ try:
     from huggingface_hub import InferenceClient
 except ImportError:
     pass
+try:
+    import httpx  # ← Pour fixer l'erreur proxies de Groq
+except ImportError:
+    pass
 # -----------------------------------------
 
 TRANSLATION_PROCESS_OPTIONS = [
@@ -32,7 +36,7 @@ TRANSLATION_PROCESS_OPTIONS = [
     "gemini_flash",
     "gemini_pro",
     "groq_llama3",
-    "hf_zephyr_7b_beta",      # ← NOUVEAU
+    "hf_zephyr_7b_beta",      # ← Zephyr rapide
     "disable_translation",
 ]
 
@@ -40,7 +44,7 @@ DOCS_TRANSLATION_PROCESS_OPTIONS = [
     "google_translator",
     "gemini_flash",
     "groq_llama3",
-    "hf_zephyr_7b_beta",      # ← NOUVEAU
+    "hf_zephyr_7b_beta",
     "disable_translation",
 ]
 
@@ -120,12 +124,10 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
 def gemini_translate(segments, target, source=None, mode="flash"):
     """Gemini Flash ou Pro - Clé API manuelle"""
     
-    # ==================== CLÉ GEMINI MANUELLE ====================
     api_key = "AIzaSyTaCléGeminiIciColleLaVraieCléComplète"   # ←←← METS TA CLÉ GEMINI ICI
     if not api_key or len(api_key) < 30:
         logger.error("❌ GEMINI: Mets ta vraie clé Gemini dans la fonction !")
         return translate_iterative(segments, target, source)
-    # =========================================================
 
     if mode == "pro":
         model_id = "gemini-3.1-pro-preview"
@@ -180,20 +182,23 @@ def gemini_translate(segments, target, source=None, mode="flash"):
     return translated_segments
 
 # ==============================================================================
-# 🚀 GROQ (Llama3) - Clé manuelle
+# 🚀 GROQ (Llama3) - Fix proxies + Clé manuelle
 # ==============================================================================
 def groq_translate(segments, target, source=None):
-    """Groq Llama3 - Clé API manuelle"""
+    """Groq Llama3 - Fix proxies + Clé manuelle"""
     
-    # ==================== CLÉ GROQ MANUELLE ====================
     api_key = "gsk_taCléGroqIciColleLaVraieClé"   # ←←← METS TA CLÉ GROQ ICI
     if not api_key:
         logger.error("❌ GROQ: Mets ta vraie clé Groq dans la fonction !")
         return translate_iterative(segments, target, source)
-    # =========================================================
 
     try:
-        client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
+        http_client = httpx.Client(timeout=60.0)
+        client = OpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=api_key,
+            http_client=http_client
+        )
     except Exception as e:
         logger.error(f"❌ GROQ Client Error: {e}")
         return translate_iterative(segments, target, source)
@@ -229,26 +234,28 @@ def groq_translate(segments, target, source=None):
     return translated_segments
 
 # ==============================================================================
-# 🔥 ZEPHYR-7B-BETA (Hugging Face) - Clé manuelle + BATCH
+# 🔥 ZEPHYR-7B-BETA (Hugging Face) - Fix provider + ULTRA RAPIDE
 # ==============================================================================
-def hf_zephyr_translate(segments, target, source=None, batch_size=6):
-    """Zephyr-7B-Beta via HF Inference API - Token manuel + Batch"""
+def hf_zephyr_translate(segments, target, source=None, batch_size=10):
+    """Zephyr-7B-Beta - Provider fixé + vitesse optimisée"""
     
-    # ==================== TOKEN HF MANUEL ====================
-    hf_token = "hf_taCléHuggingFaceIciColleLaVraieToken"   # ←←← METS TA CLÉ HF ICI (commence par hf_)
+    hf_token = "hf_taCléHuggingFaceIciColleLaVraieToken"   # ←←← METS TA CLÉ HF ICI
     if not hf_token or not hf_token.startswith("hf_"):
         logger.error("❌ ZEPHYR: Mets ta vraie clé HF dans la fonction !")
         return translate_iterative(segments, target, source)
-    # =========================================================
 
     try:
-        client = InferenceClient(model="HuggingFaceH4/zephyr-7b-beta", token=hf_token)
+        client = InferenceClient(
+            model="HuggingFaceH4/zephyr-7b-beta",
+            token=hf_token,
+            provider="hf-inference"   # ← FIX PRINCIPAL
+        )
     except Exception as e:
         logger.error(f"❌ ZEPHYR Init Error: {e}")
         return translate_iterative(segments, target, source)
 
     translated_segments = copy.deepcopy(segments)
-    progress_bar = tqdm(total=len(segments), desc="Translating (Zephyr-7B BATCH)")
+    progress_bar = tqdm(total=len(segments), desc="Translating (Zephyr-7B BATCH 10)")
     lang_tg = re.sub(r'\([^)]*\)', '', INVERTED_LANGUAGES.get(target, target)).strip()
 
     for start in range(0, len(segments), batch_size):
@@ -270,7 +277,7 @@ Translate these {batch_len} subtitle lines:
             try:
                 response = client.text_generation(
                     prompt,
-                    max_new_tokens=1200,
+                    max_new_tokens=1500,
                     temperature=0.35,
                     top_p=0.9,
                     return_full_text=False,
@@ -288,7 +295,7 @@ Translate these {batch_len} subtitle lines:
                     break
             except Exception as e:
                 logger.warning(f"Zephyr error (batch {start//batch_size}): {e}")
-                time.sleep(6 + attempt * 3)
+                time.sleep(5 + attempt * 2)
 
         if not success:
             logger.warning(f"Fallback Google sur batch Zephyr {start//batch_size}")
@@ -300,7 +307,7 @@ Translate these {batch_len} subtitle lines:
                     pass
 
         progress_bar.update(batch_len)
-        time.sleep(7)
+        time.sleep(4)   # ← Plus rapide mais stable
 
     progress_bar.close()
     return translated_segments
