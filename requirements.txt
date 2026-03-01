@@ -8,6 +8,7 @@ yt-dlp
 gradio==4.19.2
 pydub==0.25.1
 edge-tts
+groq
 deep_translator==1.11.4
 git+https://github.com/m-bain/whisperX.git@a5dca2c
 gTTS
