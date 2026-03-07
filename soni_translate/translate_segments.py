@@ -182,15 +182,17 @@ def gemini_translate(segments, target, source=None, mode="flash"):
     return translated_segments
 
 # ==============================================================================
-# 🚀 GROQ (Llama3) - Fix proxies + Clé manuelle
+# 🚀 GROQ (Llama 3.3) - Modèle mis à jour (Mars 2026)
 # ==============================================================================
 def groq_translate(segments, target, source=None):
-    """Groq Llama3 - Fix proxies + Clé manuelle"""
+    """Groq Llama-3.3-70B-Versatile - Modèle officiel de remplacement"""
     
-    api_key = "gsk_taCléGroqIciColleLaVraieClé"   # ←←← METS TA CLÉ GROQ ICI
+    # ==================== CLÉ GROQ MANUELLE ====================
+    api_key = "gsk_taCléGroqIciColleLaVraieClé"   # ←←← TA CLÉ GROQ ICI
     if not api_key:
         logger.error("❌ GROQ: Mets ta vraie clé Groq dans la fonction !")
         return translate_iterative(segments, target, source)
+    # =========================================================
 
     try:
         http_client = httpx.Client(timeout=60.0)
@@ -204,7 +206,7 @@ def groq_translate(segments, target, source=None):
         return translate_iterative(segments, target, source)
 
     translated_segments = copy.deepcopy(segments)
-    progress_bar = tqdm(total=len(segments), desc="Translating (Groq)")
+    progress_bar = tqdm(total=len(segments), desc="Translating (Groq Llama-3.3)")
     lang_tg = re.sub(r'\([^)]*\)', '', INVERTED_LANGUAGES.get(target, target)).strip()
 
     for i, line in enumerate(translated_segments):
@@ -216,7 +218,7 @@ def groq_translate(segments, target, source=None):
                     {"role": "system", "content": f"You are a dubbing translator. Translate to {lang_tg}. Use natural spoken style. Output ONLY the translation."},
                     {"role": "user", "content": text}
                 ],
-                model="llama3-70b-8192",
+                model="llama-3.3-70b-versatile",   # ←←← CHANGEMENT ICI (le nouveau modèle)
                 temperature=0.3,
             )
             res = chat.choices[0].message.content
@@ -232,7 +234,6 @@ def groq_translate(segments, target, source=None):
         progress_bar.update(1)
     progress_bar.close()
     return translated_segments
-
 # ==============================================================================
 # 🔥 ZEPHYR-7B-BETA (Hugging Face) - Fix provider + ULTRA RAPIDE
 # ==============================================================================
