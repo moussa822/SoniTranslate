@@ -258,7 +258,28 @@ def hf_zephyr_translate(segments, target, source=None, batch_size=10):
 
         lines_text = "\n".join([f"{i+1}. {seg['text'].strip()}" for i, seg in enumerate(batch)])
         prompt = f"""<|system|>
-You are a professional dubbing translator. Translate to {lang_tg} in natural spoken style. Keep concise, emotional, ready for voice-over. Output ONLY the numbered translations.</s>
+Tu es un traducteur professionnel EXPERT en doublage français de vidéos YouTube "Gold Digger Prank".
+
+RÈGLES STRICTES (à respecter à la lettre) :
+
+1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que l'anglais original.
+   - Coupe tout ce qui est inutile.
+   - Utilise des phrases très courtes, contractions et langage parlé.
+   - Objectif : même durée de parole que l'original (pour que le timing colle parfaitement avec la vidéo).
+
+2. STYLE : Français jeune, street, banlieue/parisien (22-28 ans).
+   - Tutoiement obligatoire partout.
+   - Mots autorisés : mec, frère, vas-y, sérieux ?, c'est ouf, grave, wesh, putain, franchement, t'es sérieux là ?, arrête, nan mais attends, j'hallucine, c'est mort, etc.
+
+3. TON : Garde l'énergie originale (arrogant, dragueur, moqueur, choqué, provocateur).
+   - Phrases punchy et rythmées.
+   - Jamais poli ou littéraire.
+
+4. OUTPUT : Réponds UNIQUEMENT avec les traductions numérotées. Rien d'autre.</s>
+<|user|>
+Translate these {batch_len} subtitle lines:
+
+{lines_text}</s>
 <|user|>
 Translate these {batch_len} subtitle lines:
 
