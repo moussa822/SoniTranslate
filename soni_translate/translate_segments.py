@@ -60,7 +60,7 @@ RÈGLES OBLIGATOIRES :
 
 2. STYLE : Français jeune, street, banlieue/parisien (22-28 ans).
    - Toujours tutoyer.
-   - Mots : mec, frère, vas-y, sérieux ?, c'est ouf, grave, wesh, putain, franchement, t'es sérieux là ?, arrête, nan mais attends, j'hallucine, c'est mort, etc.
+  
 
 3. TON : Arrogant, dragueur, moqueur, choqué, provocateur. Garde l'énergie exacte.
 
