@@ -8,7 +8,7 @@ import re
 import time
 import os
 
-# --- IMPORTS ---
+# --- IMPORTS COMPATIBLES SDK V2 (2026) ---
 try:
     from google import genai
     from google.genai import types
@@ -40,13 +40,21 @@ TRANSLATION_PROCESS_OPTIONS = [
     "disable_translation",
 ]
 
+DOCS_TRANSLATION_PROCESS_OPTIONS = [
+    "google_translator",
+    "gemini_flash",
+    "groq_llama3",
+    "hf_zephyr_7b_beta",
+    "disable_translation",
+]
+
 # ==============================================================================
-# PROMPT GOLD DIGGER (même pour toutes les IA)
+# PROMPT GOLD DIGGER (optimisé longueur + style)
 # ==============================================================================
 GOLD_DIGGER_PROMPT = """Tu es un traducteur professionnel EXPERT en doublage français de vidéos YouTube "Gold Digger Prank".
 
 RÈGLES OBLIGATOIRES :
-1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que l'anglais original.
+1. LONGUEUR : Le français DOIT ÊTRE AUSSI COURT ou PLUS COURT que l'anglais original.
    - Coupe tout superflu. Phrases très courtes et naturelles.
    - Objectif : même durée de parole que l'original (timing parfait avec la vidéo).
 
@@ -58,11 +66,81 @@ RÈGLES OBLIGATOIRES :
 
 4. OUTPUT : Réponds UNIQUEMENT avec la traduction. Rien d'autre."""
 
+def translate_iterative(segments, target, source=None):
+    """Fallback : Traduction Google classique mot à mot"""
+    segments_ = copy.deepcopy(segments)
+    if not source: source = "auto"
+    translator = GoogleTranslator(source=source, target=target)
+    for line in tqdm(range(len(segments_))):
+        text = segments_[line]["text"]
+        try:
+            translated_line = translator.translate(text.strip())
+            segments_[line]["text"] = translated_line
+        except Exception as e:
+            logger.error(f"Error google iterative: {e}")
+    return segments_
+
+def verify_translate(segments, segments_copy, translated_lines, target, source):
+    if len(segments) == len(translated_lines):
+        for line in range(len(segments_copy)):
+            segments_copy[line]["text"] = translated_lines[line].replace("\t", "").replace("\n", "").strip()
+        return segments_copy
+    else:
+        return translate_iterative(segments, target, source)
+
+def translate_batch(segments, target, chunk_size=2000, source=None):
+    """Traduction Google par blocs (Rapide)"""
+    segments_copy = copy.deepcopy(segments)
+    if not source: source = "auto"
+    text_lines = [seg["text"].strip() for seg in segments_copy]
+    text_merge = []
+    actual_chunk = ""
+    global_text_list = []
+    actual_text_list = []
+    for one_line in text_lines:
+        one_line = " " if not one_line else one_line
+        if (len(actual_chunk) + len(one_line)) <= chunk_size:
+            if actual_chunk: actual_chunk += " ||||| "
+            actual_chunk += one_line
+            actual_text_list.append(one_line)
+        else:
+            text_merge.append(actual_chunk)
+            actual_chunk = one_line
+            global_text_list.append(actual_text_list)
+            actual_text_list = [one_line]
+    if actual_chunk:
+        text_merge.append(actual_chunk)
+        global_text_list.append(actual_text_list)
+
+    progress_bar = tqdm(total=len(segments), desc="Translating (Google Batch)")
+    translator = GoogleTranslator(source=source, target=target)
+    split_list = []
+   
+    try:
+        for text, text_iterable in zip(text_merge, global_text_list):
+            translated_line = translator.translate(text.strip())
+            split_text = translated_line.split("|||||")
+            if len(split_text) == len(text_iterable):
+                progress_bar.update(len(split_text))
+            else:
+                split_text = []
+                for txt_iter in text_iterable:
+                    translated_txt = translator.translate(txt_iter.strip())
+                    split_text.append(translated_txt)
+                    progress_bar.update(1)
+            split_list.append(split_text)
+        progress_bar.close()
+    except Exception:
+        progress_bar.close()
+        return translate_iterative(segments, target, source)
+    translated_lines = list(chain.from_iterable(split_list))
+    return verify_translate(segments, segments_copy, translated_lines, target, source)
+
 # ==============================================================================
-# GEMINI - Prompt intégré
+# 🔥 GEMINI - Prompt Gold Digger intégré
 # ==============================================================================
 def gemini_translate(segments, target, source=None, mode="flash"):
-    api_key = "AIzaSyTaCléGeminiIciColleLaVraieCléComplète"   # ← TA CLÉ
+    api_key = "AIzaSyTaCléGeminiIciColleLaVraieCléComplète"   # ← TA CLÉ ICI
     if not api_key or len(api_key) < 30:
         logger.error("❌ GEMINI: Mets ta vraie clé !")
         return translate_iterative(segments, target, source)
@@ -74,9 +152,12 @@ def gemini_translate(segments, target, source=None, mode="flash"):
         config = types.GenerateContentConfig(
             temperature=0.2,
             max_output_tokens=1024,
-            safety_settings=[types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE) 
-                           for c in [types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                                     types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, types.HarmCategory.HARM_CATEGORY_HARASSMENT]],
+            safety_settings=[
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            ],
             system_instruction=GOLD_DIGGER_PROMPT
         )
     except Exception as e:
@@ -111,10 +192,10 @@ def gemini_translate(segments, target, source=None, mode="flash"):
     return translated_segments
 
 # ==============================================================================
-# GROQ - Prompt intégré
+# 🚀 GROQ - Prompt Gold Digger intégré
 # ==============================================================================
 def groq_translate(segments, target, source=None):
-    api_key = "gsk_taCléGroqIciColleLaVraieClé"   # ← TA CLÉ
+    api_key = "gsk_taCléGroqIciColleLaVraieClé"   # ← TA CLÉ ICI
     if not api_key:
         logger.error("❌ GROQ: Mets ta vraie clé !")
         return translate_iterative(segments, target, source)
@@ -158,10 +239,10 @@ def groq_translate(segments, target, source=None):
     return translated_segments
 
 # ==============================================================================
-# ZEPHYR - Prompt intégré (format que tu voulais)
+# 🔥 ZEPHYR-7B - Prompt Gold Digger intégré
 # ==============================================================================
 def hf_zephyr_translate(segments, target, source=None, batch_size=10):
-    hf_token = "hf_taCléHuggingFaceIciColleLaVraieToken"   # ← TA CLÉ
+    hf_token = "hf_taCléHuggingFaceIciColleLaVraieToken"   # ← TA CLÉ ICI
     if not hf_token or not hf_token.startswith("hf_"):
         logger.error("❌ ZEPHYR: Mets ta vraie clé !")
         return translate_iterative(segments, target, source)
@@ -230,10 +311,12 @@ Translate these {batch_len} subtitle lines to French (keep the same length or sh
     progress_bar.close()
     return translated_segments
 
-# ==============================================================================
-# Les autres fonctions restent identiques (translate_iterative, translate_batch, translate_text, etc.)
-# ==============================================================================
-# [Je ne les recopie pas ici pour ne pas alourdir le message, mais elles sont exactement les mêmes que dans la version précédente que je t’ai donnée]
+# ------------------------------
+def gpt_sequential(segments, model, target, source=None):
+    return translate_iterative(segments, target, source)
+
+def gpt_batch(segments, model, target, token_batch_limit=900, source=None):
+    return translate_iterative(segments, target, source)
 
 def translate_text(
     segments,
@@ -243,6 +326,7 @@ def translate_text(
     source=None,
     token_batch_limit=1000,
 ):
+    """Fonction principale"""
     target_clean = fix_code_language(target)
     source_clean = fix_code_language(source) if source else "auto"
     match translation_process:
