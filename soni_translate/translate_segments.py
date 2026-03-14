@@ -49,22 +49,25 @@ DOCS_TRANSLATION_PROCESS_OPTIONS = [
 ]
 
 # ==============================================================================
-# PROMPT GOLD DIGGER (optimisé longueur + style)
+# NOUVEAU PROMPT - Conversation naturelle + adaptation slang américain
 # ==============================================================================
-GOLD_DIGGER_PROMPT = """Tu es un traducteur professionnel EXPERT en doublage français de vidéos YouTube "Gold Digger Prank".
+CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage français pour vidéos YouTube "Gold Digger Prank".
 
 RÈGLES OBLIGATOIRES :
-1. LONGUEUR : Le français DOIT ÊTRE AUSSI COURT ou PLUS COURT que l'anglais original.
-   - Coupe tout superflu. Phrases très courtes et naturelles.
-   - Objectif : même durée de parole que l'original (timing parfait avec la vidéo).
+1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que l'anglais original.
+   - Phrases courtes et naturelles.
 
-2. STYLE : Français jeune, street, banlieue/parisien (22-28 ans).
-   - Toujours tutoyer.
-  
+2. STYLE : Français naturel de jeunes (22-28 ans) en conversation réelle.
+   - Tutoiement fluide et naturel.
+   - Langage courant : mec, frère, vas-y, sérieux ?, c'est ouf, grave, etc. (utilise seulement quand ça sonne vrai, pas forcé).
 
-3. TON : Arrogant, dragueur, moqueur, choqué, provocateur. Garde l'énergie exacte.
+3. ADAPTATION : Transforme le slang américain ("gargo") en français courant et naturel.
+   - Rends la conversation fluide comme si deux jeunes Français parlaient vraiment.
+   - Garde l'énergie (drague, arrogance, moquerie, choc) mais sans exagérer.
 
-4. OUTPUT : Réponds UNIQUEMENT avec la traduction. Rien d'autre."""
+4. CONTEXTE : Tiens compte des lignes précédentes pour que tout coule naturellement.
+
+Réponds UNIQUEMENT avec les traductions numérotées. Rien d'autre."""
 
 def translate_iterative(segments, target, source=None):
     """Fallback : Traduction Google classique mot à mot"""
@@ -137,167 +140,30 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
     return verify_translate(segments, segments_copy, translated_lines, target, source)
 
 # ==============================================================================
-# 🔥 GEMINI - Prompt Gold Digger intégré
+# Fonction batch + contexte global (utilisée par tous les modèles)
 # ==============================================================================
-def gemini_translate(segments, target, source=None, mode="flash"):
-    api_key = "AIzaSyTaCléGeminiIciColleLaVraieCléComplète"   # ← TA CLÉ ICI
-    if not api_key or len(api_key) < 30:
-        logger.error("❌ GEMINI: Mets ta vraie clé !")
-        return translate_iterative(segments, target, source)
-
-    model_id = "gemini-3.1-pro-preview" if mode == "pro" else "gemini-flash-latest"
-
-    try:
-        client = genai.Client(api_key=api_key)
-        config = types.GenerateContentConfig(
-            temperature=0.2,
-            max_output_tokens=1024,
-            safety_settings=[
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-                types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            ],
-            system_instruction=GOLD_DIGGER_PROMPT
-        )
-    except Exception as e:
-        logger.error(f"❌ GEMINI Init Error: {e}")
-        return translate_iterative(segments, target, source)
-
-    translated_segments = copy.deepcopy(segments)
-    progress_bar = tqdm(total=len(segments), desc=f"Translating (Gemini {mode.upper()})")
-    lang_tg_safe = "French"
-
-    for i, line in enumerate(translated_segments):
-        text = line["text"].strip()
-        if not text:
-            progress_bar.update(1)
-            continue
-        prompt = f"Translate to {lang_tg_safe}:\n{text}"
-        try:
-            response = client.models.generate_content(model=model_id, contents=prompt, config=config)
-            if response.text:
-                translated_segments[i]["text"] = response.text.strip()
-        except Exception as e:
-            error_msg = str(e).encode('utf-8', errors='replace').decode('utf-8')
-            logger.warning(f"Gemini error segment {i}: {error_msg}")
-            try:
-                tr = GoogleTranslator(source='auto', target=fix_code_language(target))
-                translated_segments[i]["text"] = tr.translate(text).strip()
-            except:
-                pass
-        progress_bar.update(1)
-        time.sleep(0.6 if mode == "pro" else 0.08)
-    progress_bar.close()
-    return translated_segments
-
-# ==============================================================================
-# 🚀 GROQ - Prompt Gold Digger intégré
-# ==============================================================================
-def groq_translate(segments, target, source=None):
-    api_key = "gsk_taCléGroqIciColleLaVraieClé"   # ← TA CLÉ ICI
-    if not api_key:
-        logger.error("❌ GROQ: Mets ta vraie clé !")
-        return translate_iterative(segments, target, source)
-
-    try:
-        http_client = httpx.Client(timeout=60.0)
-        client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, http_client=http_client)
-    except Exception as e:
-        logger.error(f"❌ GROQ Client Error: {e}")
-        return translate_iterative(segments, target, source)
-
-    translated_segments = copy.deepcopy(segments)
-    progress_bar = tqdm(total=len(segments), desc="Translating (Groq Llama-3.3)")
-    lang_tg_safe = "French"
-
-    for i, line in enumerate(translated_segments):
-        text = line["text"].strip()
-        if not text: continue
-        try:
-            chat = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": GOLD_DIGGER_PROMPT},
-                    {"role": "user", "content": text}
-                ],
-                model="llama-3.3-70b-versatile",
-                temperature=0.3,
-            )
-            res = chat.choices[0].message.content
-            if res:
-                translated_segments[i]["text"] = res.strip()
-        except Exception as e:
-            error_msg = str(e).encode('utf-8', errors='replace').decode('utf-8')
-            logger.error(f"❌ Groq Error segment {i}: {error_msg}")
-            try:
-                tr = GoogleTranslator(source='auto', target=fix_code_language(target))
-                translated_segments[i]["text"] = tr.translate(text).strip()
-            except:
-                pass
-        progress_bar.update(1)
-    progress_bar.close()
-    return translated_segments
-
-# ==============================================================================
-# 🔥 ZEPHYR-7B - Prompt Gold Digger intégré
-# ==============================================================================
-def hf_zephyr_translate(segments, target, source=None, batch_size=10):
-    hf_token = "hf_taCléHuggingFaceIciColleLaVraieToken"   # ← TA CLÉ ICI
-    if not hf_token or not hf_token.startswith("hf_"):
-        logger.error("❌ ZEPHYR: Mets ta vraie clé !")
-        return translate_iterative(segments, target, source)
-
-    try:
-        client = InferenceClient(model="HuggingFaceH4/zephyr-7b-beta", token=hf_token)
-    except Exception as e:
-        logger.error(f"❌ ZEPHYR Init Error: {e}")
-        return translate_iterative(segments, target, source)
-
-    translated_segments = copy.deepcopy(segments)
-    progress_bar = tqdm(total=len(segments), desc="Translating (Zephyr-7B BATCH 10)")
-    lang_tg = re.sub(r'\([^)]*\)', '', INVERTED_LANGUAGES.get(target, target)).strip()
+def _batch_with_context(segments, batch_size, translate_func, desc):
+    translated = copy.deepcopy(segments)
+    progress = tqdm(total=len(segments), desc=desc)
+    context = []  # garde les 3 dernières lignes pour le contexte
 
     for start in range(0, len(segments), batch_size):
         end = min(start + batch_size, len(segments))
-        batch = translated_segments[start:end]
+        batch = translated[start:end]
         batch_len = len(batch)
 
+        previous = "\n".join([f"Précédent {i+1}: {c}" for i, c in enumerate(context[-3:])])
         lines_text = "\n".join([f"{i+1}. {seg['text'].strip()}" for i, seg in enumerate(batch)])
-        prompt = f"""<|system|>
-{GOLD_DIGGER_PROMPT}</s>
-<|user|>
-Translate these {batch_len} subtitle lines to French (keep the same length or shorter):
 
-{lines_text}</s>
-<|assistant|>"""
+        full_prompt = f"{CONTEXT_GOLD_DIGGER_PROMPT}\n\nContexte précédent :\n{previous}\n\nTraduis maintenant ces lignes :\n{lines_text}"
 
-        success = False
-        for attempt in range(4):
-            try:
-                response = client.text_generation(
-                    prompt,
-                    max_new_tokens=1500,
-                    temperature=0.35,
-                    top_p=0.9,
-                    return_full_text=False,
-                    do_sample=True
-                )
-                translated_lines = []
-                for line in response.strip().split('\n'):
-                    match = re.search(r'^\s*(\d+)\.?\s*(.+)$', line.strip())
-                    if match:
-                        translated_lines.append(match.group(2).strip())
-                if len(translated_lines) == batch_len:
-                    for j, trans in enumerate(translated_lines):
-                        translated_segments[start + j]["text"] = trans
-                    success = True
-                    break
-            except Exception as e:
-                logger.warning(f"Zephyr error (batch {start//batch_size}): {e}")
-                time.sleep(5 + attempt * 2)
+        translated_lines = translate_func(full_prompt, batch_len)
 
-        if not success:
-            logger.warning(f"Fallback Google sur batch Zephyr {start//batch_size}")
+        if translated_lines and len(translated_lines) == batch_len:
+            for j, trans in enumerate(translated_lines):
+                translated[start + j]["text"] = trans
+            context.extend(translated_lines)
+        else:
             tr = GoogleTranslator(source='auto', target=fix_code_language(target))
             for seg in batch:
                 try:
@@ -305,13 +171,85 @@ Translate these {batch_len} subtitle lines to French (keep the same length or sh
                 except:
                     pass
 
-        progress_bar.update(batch_len)
-        time.sleep(4)
+        progress.update(batch_len)
+        time.sleep(1.8)
 
-    progress_bar.close()
-    return translated_segments
+    progress.close()
+    return translated
 
-# ------------------------------
+# ==============================================================================
+# GEMINI - Batch + Contexte global
+# ==============================================================================
+def gemini_translate(segments, target, source=None, mode="flash"):
+    api_key = "AIzaSyTaCléGeminiIciColleLaVraieCléComplète"
+    if not api_key or len(api_key) < 30:
+        logger.error("❌ GEMINI: Clé manquante !")
+        return translate_iterative(segments, target, source)
+
+    model_id = "gemini-3.1-pro-preview" if mode == "pro" else "gemini-flash-latest"
+    client = genai.Client(api_key=api_key)
+    config = types.GenerateContentConfig(temperature=0.25, max_output_tokens=1500, system_instruction=CONTEXT_GOLD_DIGGER_PROMPT)
+
+    def call_gemini(full_prompt, batch_len):
+        try:
+            response = client.models.generate_content(model=model_id, contents=full_prompt, config=config)
+            lines = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
+            return lines[:batch_len]
+        except:
+            return None
+
+    return _batch_with_context(segments, 15, call_gemini, f"Translating (Gemini {mode.upper()} BATCH CONTEXT)")
+
+# ==============================================================================
+# GROQ - Batch + Contexte global
+# ==============================================================================
+def groq_translate(segments, target, source=None):
+    api_key = "gsk_taCléGroqIciColleLaVraieClé"
+    if not api_key:
+        logger.error("❌ GROQ: Clé manquante !")
+        return translate_iterative(segments, target, source)
+
+    client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, http_client=httpx.Client(timeout=60))
+
+    def call_groq(full_prompt, batch_len):
+        try:
+            chat = client.chat.completions.create(
+                messages=[{"role": "system", "content": CONTEXT_GOLD_DIGGER_PROMPT},
+                          {"role": "user", "content": full_prompt}],
+                model="llama-3.3-70b-versatile",
+                temperature=0.3,
+            )
+            lines = [line.strip() for line in chat.choices[0].message.content.strip().split('\n') if line.strip()]
+            return lines[:batch_len]
+        except:
+            return None
+
+    return _batch_with_context(segments, 18, call_groq, "Translating (Groq BATCH CONTEXT)")
+
+# ==============================================================================
+# ZEPHYR - Batch + Contexte global (le plus rapide)
+# ==============================================================================
+def hf_zephyr_translate(segments, target, source=None, batch_size=18):
+    hf_token = "hf_taCléHuggingFaceIciColleLaVraieToken"
+    if not hf_token or not hf_token.startswith("hf_"):
+        logger.error("❌ ZEPHYR: Clé manquante !")
+        return translate_iterative(segments, target, source)
+
+    client = InferenceClient(model="HuggingFaceH4/zephyr-7b-beta", token=hf_token)
+
+    def call_zephyr(full_prompt, batch_len):
+        try:
+            response = client.text_generation(full_prompt, max_new_tokens=1400, temperature=0.35, top_p=0.9, return_full_text=False)
+            lines = [line.strip() for line in response.strip().split('\n') if line.strip()]
+            return lines[:batch_len]
+        except:
+            return None
+
+    return _batch_with_context(segments, batch_size, call_zephyr, "Translating (Zephyr BATCH CONTEXT)")
+
+# ==============================================================================
+# Fonctions restantes (identiques)
+# ==============================================================================
 def gpt_sequential(segments, model, target, source=None):
     return translate_iterative(segments, target, source)
 
