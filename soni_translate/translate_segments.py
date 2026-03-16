@@ -8,7 +8,7 @@ import re
 import time
 import os
 
-# --- IMPORTS COMPATIBLES SDK V2 (2026) ---
+# --- IMPORTS ---
 try:
     from google import genai
     from google.genai import types
@@ -26,7 +26,6 @@ try:
     import httpx
 except ImportError:
     pass
-# -----------------------------------------
 
 TRANSLATION_PROCESS_OPTIONS = [
     "google_translator_batch",
@@ -49,14 +48,14 @@ DOCS_TRANSLATION_PROCESS_OPTIONS = [
 ]
 
 # ==============================================================================
-# PROMPT FINAL - Conversation naturelle (sans numéros forcés)
+# PROMPT FINAL - Conversation naturelle
 # ==============================================================================
 CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage français pour vidéos YouTube "Gold Digger Prank".
 
 RÈGLES OBLIGATOIRES :
 1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que l'anglais original.
 2. STYLE : Français naturel de jeunes (22-28 ans) en conversation réelle.
-   - Tutoiement fluide et naturel.
+   - Tutoiement fluide.
    - Langage courant : mec, frère, vas-y, sérieux ?, c'est ouf, grave, etc. (seulement quand ça sonne vrai).
 3. ADAPTATION : Transforme le slang américain en français courant et naturel.
 4. CONTEXTE : Tiens compte des lignes précédentes pour que la conversation coule naturellement.
@@ -64,12 +63,12 @@ RÈGLES OBLIGATOIRES :
 Réponds UNIQUEMENT avec les traductions, une par ligne, sans numéros, sans explications."""
 
 # ==============================================================================
-# FONCTION BATCH + CONTEXTE GLOBAL (utilisée par tous les modèles)
+# FONCTION BATCH + CONTEXTE GLOBAL (fix NameError)
 # ==============================================================================
-def _batch_with_context(segments, batch_size, translate_func, desc):
+def _batch_with_context(segments, batch_size, translate_func, desc, target_lang):
     translated = copy.deepcopy(segments)
     progress = tqdm(total=len(segments), desc=desc)
-    context = []  # garde les 3 dernières lignes pour le contexte
+    context = []
 
     for start in range(0, len(segments), batch_size):
         end = min(start + batch_size, len(segments))
@@ -85,13 +84,12 @@ def _batch_with_context(segments, batch_size, translate_func, desc):
 
         if translated_lines and len(translated_lines) == batch_len:
             for j, trans in enumerate(translated_lines):
-                # Nettoyage automatique des numéros (1. , 1) , 1- etc.)
                 clean = re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', trans).strip()
                 translated[start + j]["text"] = clean
             context.extend(translated_lines)
         else:
-            # Fallback Google
-            tr = GoogleTranslator(source='auto', target=fix_code_language(target))
+            # FIX NAMEERROR : on utilise target_lang passé en paramètre
+            tr = GoogleTranslator(source='auto', target=fix_code_language(target_lang))
             for seg in batch:
                 try:
                     seg["text"] = tr.translate(seg["text"].strip())
@@ -125,7 +123,7 @@ def gemini_translate(segments, target, source=None, mode="flash"):
         except:
             return None
 
-    return _batch_with_context(segments, 15, call_gemini, f"Translating (Gemini {mode.upper()} BATCH CONTEXT)")
+    return _batch_with_context(segments, 15, call_gemini, f"Translating (Gemini {mode.upper()} BATCH CONTEXT)", target)
 
 # ==============================================================================
 # GROQ - Batch + Contexte
@@ -151,7 +149,7 @@ def groq_translate(segments, target, source=None):
         except:
             return None
 
-    return _batch_with_context(segments, 18, call_groq, "Translating (Groq BATCH CONTEXT)")
+    return _batch_with_context(segments, 18, call_groq, "Translating (Groq BATCH CONTEXT)", target)
 
 # ==============================================================================
 # ZEPHYR - Batch + Contexte (ultra rapide)
@@ -172,10 +170,10 @@ def hf_zephyr_translate(segments, target, source=None, batch_size=18):
         except:
             return None
 
-    return _batch_with_context(segments, batch_size, call_zephyr, "Translating (Zephyr BATCH CONTEXT)")
+    return _batch_with_context(segments, batch_size, call_zephyr, "Translating (Zephyr BATCH CONTEXT)", target)
 
 # ==============================================================================
-# FONCTIONS RESTANTES (inchangées)
+# Fonctions restantes (inchangées)
 # ==============================================================================
 def translate_iterative(segments, target, source=None):
     segments_ = copy.deepcopy(segments)
@@ -191,6 +189,7 @@ def translate_iterative(segments, target, source=None):
     return segments_
 
 def translate_batch(segments, target, chunk_size=2000, source=None):
+    # (code original complet - identique à avant)
     segments_copy = copy.deepcopy(segments)
     if not source: source = "auto"
     text_lines = [seg["text"].strip() for seg in segments_copy]
