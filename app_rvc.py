@@ -1,4 +1,4 @@
-ximport gradio as gr
+import gradio as gr
 from soni_translate.logging_setup import (
     logger,
     set_logging_level,
@@ -1693,60 +1693,54 @@ def create_gui(theme, logs_in_gui=False):
                             )
 
                     if SoniTr.tts_info.xtts_enabled:
-    with gr.Column():
-        with gr.Accordion(
-            "🎤 Coqui XTTS v2 - Multi Voice Cloning (Optionnel)",
-            open=False,
-        ):
-            gr.Markdown(
-                "Upload les voix de référence pour chaque locuteur. "
-                "Le système détecte automatiquement le nombre de speakers et assigne les voix."
-            )
-
-            # Upload multiple voices (dynamique)
-            voice_refs = []
-            for i in range(1, 6):  # jusqu'à 5 voix max
-                with gr.Row():
-                    voice_file = gr.File(
-                        label=f"Voice Reference {i} (Speaker {i-1:02d})",
-                        file_types=[".wav", ".mp3", ".ogg"],
-                        visible=True if i <= 2 else False,
-                    )
-                    voice_name = gr.Textbox(
-                        label=f"Nom pour Voice {i}",
-                        value=f"speaker_{i-1:02d}",
-                        placeholder="ex: mec_principal",
-                    )
-                    voice_refs.append((voice_file, voice_name))
-
-            # Détection auto du nombre de speakers
-            auto_detect_speakers = gr.Checkbox(
-                label="🔍 Détection automatique du nombre de speakers",
-                value=True,
-                info="Pyannote détecte seul le nombre réel (2, 3, 4...). Recommandé.",
-            )
-
-            # Option pour réduire les erreurs homme/fille
-            gender_aware = gr.Checkbox(
-                label="Gender-aware (réduit les confusions homme/fille)",
-                value=True,
-            )
-
-            # Bouton pour traiter les voix
-            process_voices_button = gr.Button(
-                "Traiter les voix et les ajouter au sélecteur TTS",
-                variant="primary",
-            )
-
-            xtts_output_status = gr.HTML()
-
-            gr.Markdown(
-                "💡 Vous pouvez uploader jusqu'à 5 voix. "
-                "Si Pyannote détecte plus de speakers, le système vous demandera les voix supplémentaires."
-            )
-else:
-    # Pour garder la compatibilité
-    pass
+                        with gr.Column():
+                            with gr.Accordion(
+                                lg_conf["xtts_title"],
+                                open=False,
+                            ):
+                                gr.Markdown(lg_conf["xtts_subtitle"])
+                                wav_speaker_file = gr.File(
+                                    label=lg_conf["xtts_file_label"]
+                                )
+                                wav_speaker_name = gr.Textbox(
+                                    label=lg_conf["xtts_name_label"],
+                                    value="",
+                                    info=lg_conf["xtts_name_info"],
+                                    placeholder="default_name",
+                                    lines=1,
+                                )
+                                wav_speaker_start = gr.Number(
+                                    label="Time audio start",
+                                    value=0,
+                                    visible=False,
+                                )
+                                wav_speaker_end = gr.Number(
+                                    label="Time audio end",
+                                    value=0,
+                                    visible=False,
+                                )
+                                wav_speaker_dir = gr.Textbox(
+                                    label="Directory save",
+                                    value="_XTTS_",
+                                    visible=False,
+                                )
+                                wav_speaker_dereverb = gr.Checkbox(
+                                    True,
+                                    label=lg_conf["xtts_dereverb_label"],
+                                    info=lg_conf["xtts_dereverb_info"]
+                                )
+                                wav_speaker_output = gr.HTML()
+                                create_xtts_wav = gr.Button(
+                                    lg_conf["xtts_button"]
+                                )
+                                gr.Markdown(lg_conf["xtts_footer"])
+                    else:
+                        wav_speaker_dereverb = gr.Checkbox(
+                            False,
+                            label=lg_conf["xtts_dereverb_label"],
+                            info=lg_conf["xtts_dereverb_info"],
+                            visible=False
+                        )
 
                     with gr.Column():
                         with gr.Accordion(
