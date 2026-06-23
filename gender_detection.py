@@ -1,4 +1,3 @@
-%%writefile SoniTranslate/soni_translate/gender_detection.py
 import os
 import torch
 import torchaudio
