@@ -1984,6 +1984,12 @@ def create_gui(theme, logs_in_gui=False):
                                 label=lg_conf["cache_label"],
                                 info=lg_conf["cache_info"],
                             )
+                            auto_detect_gender_gui = gr.Checkbox(
+                                False,
+                                label="Auto-Detect Voice Gender (FR)",
+                                info="Détecte automatiquement le genre de chaque voix pour attribuer Henri (Homme) ou Denise (Femme) en français."
+                            )
+                            
                             PREVIEW = gr.Checkbox(
                                 label="Preview", info=lg_conf["preview_info"]
                             )
@@ -2707,6 +2713,7 @@ def create_gui(theme, logs_in_gui=False):
                 enable_cache_gui,
                 enable_custom_voice,
                 workers_custom_voice,
+                auto_detect_gender_gui,
                 is_gui_dummy_check,
             ],
             outputs=subs_edit_space,
@@ -2774,6 +2781,7 @@ def create_gui(theme, logs_in_gui=False):
                 enable_cache_gui,
                 enable_custom_voice,
                 workers_custom_voice,
+                auto_detect_gender_gui,
                 is_gui_dummy_check,
             ],
             outputs=video_output,
