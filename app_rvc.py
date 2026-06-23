@@ -435,6 +435,7 @@ class SoniTranslate(SoniTrCache):
         custom_voices_workers=1,
         is_gui=False,
         progress=gr.Progress(),
+        auto_detect_gender=False,
     ):
         if not YOUR_HF_TOKEN:
             YOUR_HF_TOKEN = os.getenv("YOUR_HF_TOKEN")
@@ -959,6 +960,47 @@ class SoniTranslate(SoniTrCache):
         ], {
             "sub_file": self.sub_file
         }):
+            # ==============================================================
+            # DÉBUT : INTERCEPTEUR POUR LA DÉTECTION DE GENRE AUTOMATIQUE
+            # ==============================================================
+            if auto_detect_gender:
+                try:
+                    prog_disp("Analyzing speaker genders automatically...", 0.75, is_gui, progress=progress)
+                    from soni_translate.gender_detection import VoiceGenderDetector, auto_assign_voices
+                    
+                    # Détermine quel fichier audio utiliser pour l'analyse
+                    audio_for_detection = self.vocals if hasattr(self, 'vocals') and self.vocals else base_audio_wav
+                    
+                    if os.path.exists(audio_for_detection):
+                        detector = VoiceGenderDetector()
+                        speaker_genders = detector.detect_speaker_genders(audio_for_detection, self.result_diarize)
+                        
+                        # Calcule le dictionnaire d'attribution des voix EdgeTTS
+                        assigned_voices = auto_assign_voices(speaker_genders, target_language=TRANSLATE_AUDIO_TO)
+                        
+                        # On remplace à la volée les choix de voix manuels par les voix détectées par l'IA
+                        tts_voice00 = assigned_voices.get("SPEAKER_00", tts_voice00)
+                        tts_voice01 = assigned_voices.get("SPEAKER_01", tts_voice01)
+                        tts_voice02 = assigned_voices.get("SPEAKER_02", tts_voice02)
+                        tts_voice03 = assigned_voices.get("SPEAKER_03", tts_voice03)
+                        tts_voice04 = assigned_voices.get("SPEAKER_04", tts_voice04)
+                        tts_voice05 = assigned_voices.get("SPEAKER_05", tts_voice05)
+                        tts_voice06 = assigned_voices.get("SPEAKER_06", tts_voice06)
+                        tts_voice07 = assigned_voices.get("SPEAKER_07", tts_voice07)
+                        tts_voice08 = assigned_voices.get("SPEAKER_08", tts_voice08)
+                        tts_voice09 = assigned_voices.get("SPEAKER_09", tts_voice09)
+                        tts_voice10 = assigned_voices.get("SPEAKER_10", tts_voice10)
+                        tts_voice11 = assigned_voices.get("SPEAKER_11", tts_voice11)
+                        
+                        logger.info(f"Voices overridden automatically by Gender Detection: SPEAKER_00={tts_voice00}, SPEAKER_01={tts_voice01}")
+                    else:
+                        logger.warning("Vocal or base audio file not found on disk. Falling back to manual choices.")
+                except Exception as e:
+                    logger.error(f"Error in voice gender detector: {str(e)}")
+            # ==============================================================
+            # FIN DE L'INTERCEPTEUR
+            # ==============================================================
+
             prog_disp("Text to speech...", 0.80, is_gui, progress=progress)
             self.valid_speakers = audio_segmentation_to_voice(
                 self.result_diarize,
