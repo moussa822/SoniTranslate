@@ -433,9 +433,9 @@ class SoniTranslate(SoniTrCache):
         enable_cache=True,
         custom_voices=False,
         custom_voices_workers=1,
-        is_gui=False,
-        progress=gr.Progress(),
-        auto_detect_gender=False,
+        auto_detect_gender=False, # <--- DOIT ÊTRE ICI
+        is_gui=False,             # <--- DOIT ÊTRE ICI
+        progress=gr.Progress(),   # <--- DOIT RESTER TOUT À LA FIN
     ):
         if not YOUR_HF_TOKEN:
             YOUR_HF_TOKEN = os.getenv("YOUR_HF_TOKEN")
