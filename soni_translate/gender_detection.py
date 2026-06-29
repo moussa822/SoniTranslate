@@ -37,6 +37,7 @@ class VoiceGenderDetector:
             return {}
 
         speaker_genders = {}
+        total_frames = waveform.shape[1] # Sécurité : Taille max de l'audio d'origine
 
         for speaker, segments in speaker_segments.items():
             speaker_chunks = []
@@ -47,14 +48,18 @@ class VoiceGenderDetector:
                 if duration < 0.5:
                     continue
                 
-                start_frame = int(start * sample_rate)
-                end_frame = int(end * sample_rate)
+                # Sécurité : on s'assure que les index calculés ne dépassent jamais la taille du fichier d'origine
+                start_frame = min(int(start * sample_rate), total_frames)
+                end_frame = min(int(end * sample_rate), total_frames)
+                
+                if start_frame >= end_frame:
+                    continue
                 
                 chunk = waveform[:, start_frame:end_frame]
                 speaker_chunks.append(chunk)
                 accumulated_duration += duration
                 
-                if accumulated_duration >= 8.0:
+                if accumulated_duration >= 8.0:  # Échantillon de 8 secondes cumulées
                     break
 
             if not speaker_chunks:
@@ -71,9 +76,7 @@ class VoiceGenderDetector:
             # Conversion en Mono
             mono_waveform = combined_waveform.mean(dim=0, keepdim=True)
             
-            # --- AJOUT : NORMALISATION DE VOLUME ---
-            # Si le volume de l'extrait est trop bas, on le remonte à un niveau standard (0.9)
-            # pour que l'IA entende parfaitement la voix sans distorsion.
+            # Normalisation du volume (Peak Normalization à 0.9)
             peak = torch.max(torch.abs(mono_waveform))
             if peak > 0.0:
                 mono_waveform = (mono_waveform / peak) * 0.9
@@ -93,29 +96,20 @@ class VoiceGenderDetector:
                 if os.path.exists(temp_wav_path):
                     os.remove(temp_wav_path)
 
-            return speaker_genders
+        # RETOUR HORS DE LA BOUCLE : On renvoie le dictionnaire complet seulement après avoir analysé TOUS les locuteurs !
+        return speaker_genders
 
 
-def auto_assign_voices(speaker_genders, target_language="french"):
-    lang = target_language.lower()
-    
-    # Voix par défaut pour le Français
-    french_male = "fr-FR-HenriNeural-Male"
-    french_female = "fr-FR-DeniseNeural-Female"
-    
-    # Voix par défaut pour l'Anglais
-    english_male = "en-US-AndrewMultilingualNeural-Male"
-    english_female = "en-US-EmmaMultilingualNeural-Female"
-
+def auto_assign_voices(speaker_genders, target_language="french", default_male="fr-FR-HenriNeural-Male", default_female="fr-FR-DeniseNeural-Female"):
+    """
+    Assigne automatiquement les voix sélectionnées par l'utilisateur
+    dans l'interface en fonction du genre détecté de manière universelle.
+    """
     assigned_voices = {}
     for speaker, gender in speaker_genders.items():
-        if "french" in lang or "fr" in lang:
-            assigned_voices[speaker] = french_female if gender == "female" else french_male
+        if gender == "female":
+            assigned_voices[speaker] = default_female
         else:
-            assigned_voices[speaker] = english_female if gender == "female" else english_male
-            # --- CAS 2 : L'utilisateur utilise Kokoro TTS ---
-        elif "kokoro" in voice_str:
-            assigned_voices[speaker] = "Kokoro/ff_sixtine" if gender == "female" else "Kokoro/fm_julien"
-
+            assigned_voices[speaker] = default_male
             
     return assigned_voices
