@@ -86,6 +86,7 @@ from soni_translate.text_multiformat_processor import (
     create_video_from_images,
     merge_video_and_audio,
 )
+# no update
 from soni_translate.languages_gui import language_data, news
 import copy
 import logging
@@ -96,6 +97,87 @@ import argparse
 import time
 import hashlib
 import sys
+import os
+
+# ==============================================================================
+# MONKEY-PATCH : SYSTÈME D'INTÉGRATION KOKORO TTS (BETA)
+# ==============================================================================
+import soni_translate.text_to_speech
+
+# Sauvegarde de la fonction de génération originale
+original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
+
+def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs):
+    tts_voices = list(args[:12])
+    
+    # On regarde si au moins une voix "Kokoro/" est demandée
+    has_kokoro = any(isinstance(v, str) and v.startswith("Kokoro/") for v in tts_voices)
+    
+    if not has_kokoro:
+        # Si pas de Kokoro, on laisse tourner le moteur d'origine à 100%
+        return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+    
+    # Initialisation de Kokoro de manière sécurisée (uniquement si demandé)
+    import os
+    import torch
+    import soundfile as sf
+    from kokoro import KPipeline
+    
+    logger = logging.getLogger("soni_translate")
+    logger.info("Initializing Kokoro TTS Engine...")
+    
+    lang_code = 'f' if 'fr' in TRANSLATE_AUDIO_TO.lower() or 'french' in TRANSLATE_AUDIO_TO.lower() else 'a'
+    pipeline = KPipeline(lang_code=lang_code)
+    
+    os.makedirs("audio", exist_ok=True)
+    valid_speakers = []
+    
+    # On traite les segments un par un
+    for segment in result_diarize["segments"]:
+        speaker = segment.get("speaker", "SPEAKER_00")
+        speaker_idx = int(speaker[-2:]) if speaker.startswith("SPEAKER_") else 0
+        voice = tts_voices[speaker_idx]
+        
+        text = segment["text"].strip()
+        start = segment["start"]
+        output_file = f"audio/{start}.ogg"
+        
+        if isinstance(voice, str) and voice.startswith("Kokoro/"):
+            kokoro_voice = voice.split("/")[-1]
+            
+            try:
+                # Génération de l'audio via Kokoro
+                generator = pipeline(text, voice=kokoro_voice, speed=1.0)
+                audio_pieces = []
+                for _, _, audio in generator:
+                    audio_pieces.append(torch.from_numpy(audio))
+                
+                if audio_pieces:
+                    combined_audio = torch.cat(audio_pieces).numpy()
+                    # Enregistrement natif à 24000Hz (format attendu par SoniTranslate)
+                    sf.write(output_file, combined_audio, 24000)
+                    
+                if speaker not in valid_speakers:
+                    valid_speakers.append(speaker)
+            except Exception as e:
+                logger.error(f"Error generating Kokoro segment {start}: {str(e)}")
+                # Fallback d'urgence segment par segment sur le moteur original si Kokoro plante
+                temp_diarize = {"segments": [segment]}
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+                if speaker not in valid_speakers:
+                    valid_speakers.append(speaker)
+        else:
+            # Si ce speaker n'utilise pas Kokoro, on génère son segment via l'outil d'origine
+            temp_diarize = {"segments": [segment]}
+            original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+            if speaker not in valid_speakers:
+                valid_speakers.append(speaker)
+                
+    return valid_speakers
+
+# Application dynamique du Patch
+soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
+# ==============================================================================
 
 directories = [
     "downloads",
@@ -130,9 +212,16 @@ class TTS_Info:
         self.list_coqui_xtts = (
             coqui_xtts_voices_list() if self.xtts_enabled else []
         )
-        list_tts = self.list_coqui_xtts + sorted(
+        # NOUVELLE VARIABLE : Nos voix Kokoro
+        list_kokoro = [
+            "Kokoro/ff_sixtine", # Voix française féminine sublime
+            "Kokoro/fm_julien",  # Voix française masculine naturelle
+            "Kokoro/af_sarah",   # Voix anglaise féminine
+            "Kokoro/am_adam"     # Voix anglaise masculine
+        ]
+        list_tts = self.list_coqui_xtts + list_kokoro + sorted(
             self.list_edge
-            + self.list_bark
+            + (self.list_bark if os.environ.get("ZERO_GPU") != "TRUE" else [])
             + self.list_vits
             + self.list_openai_tts
             + self.list_vits_onnx
