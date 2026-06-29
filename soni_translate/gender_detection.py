@@ -5,14 +5,15 @@ from transformers import pipeline
 from soni_translate.logging_setup import logger
 
 class VoiceGenderDetector:
-    def __init__(self, model_id="norwoodsystems/norwood-maleVSfemale"):
+    # On passe sur un modèle multilingue d'une précision chirurgicale (F1 score: 0.9993)
+    def __init__(self, model_id="alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech"):
         self.model_id = model_id
         self.classifier = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def load_model(self):
         if self.classifier is None:
-            logger.info(f"Loading voice gender classification model: {self.model_id}")
+            logger.info(f"Loading multilingual voice gender classification model: {self.model_id}")
             self.classifier = pipeline(
                 "audio-classification",
                 model=self.model_id,
@@ -54,7 +55,7 @@ class VoiceGenderDetector:
                 speaker_chunks.append(chunk)
                 accumulated_duration += duration
                 
-                if accumulated_duration >= 8.0:
+                if accumulated_duration >= 8.0:  # 8 secondes suffisent largement
                     break
 
             if not speaker_chunks:
@@ -63,32 +64,48 @@ class VoiceGenderDetector:
                 continue
 
             combined_waveform = torch.cat(speaker_chunks, dim=1)
-            audio_mono = combined_waveform.mean(dim=0).numpy()
+            
+            # Étape essentielle : Ré-échantillonnage à 16000 Hz pour la compatibilité absolue avec Wav2Vec2
+            if sample_rate != 16000:
+                transform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
+                combined_waveform = transform(combined_waveform)
+
+            # Conversion en Mono
+            mono_waveform = combined_waveform.mean(dim=0, keepdim=True)
+            
+            # Sauvegarde d'un fichier WAV temporaire propre pour l'analyse
+            temp_wav_path = f"temp_gender_{speaker}.wav"
+            torchaudio.save(temp_wav_path, mono_waveform, 16000)
 
             try:
-                predictions = self.classifier({"raw": audio_mono, "sampling_rate": sample_rate})
-                gender_label = predictions[0]["label"].lower()
+                # Analyse directe du fichier propre
+                predictions = self.classifier(temp_wav_path)
+                gender_label = predictions[0]["label"].lower() # 'male' ou 'female'
                 speaker_genders[speaker] = gender_label
                 logger.info(f"Gender detected for {speaker}: {gender_label} (Confidence: {predictions[0]['score']:.2f})")
             except Exception as e:
                 logger.error(f"Failed to detect gender for {speaker}: {e}")
                 speaker_genders[speaker] = "unknown"
+            finally:
+                # Nettoyage immédiat du fichier temporaire
+                if os.path.exists(temp_wav_path):
+                    os.remove(temp_wav_path)
 
         return speaker_genders
 
 
 def auto_assign_voices(speaker_genders, target_language="french"):
     """
-    Assigne automatiquement des voix de référence
+    Assigne automatiquement des voix EdgeTTS de référence
     en fonction du genre détecté et de la langue cible.
     """
     lang = target_language.lower()
     
-    # Voix par défaut pour le Français
-    french_male = "fr-FR-HenriNeural"
-    french_female = "fr-FR-DeniseNeural"
+    # Voix par défaut pour le Français (avec le suffixe SoniTranslate requis !)
+    french_male = "fr-FR-HenriNeural-Male"
+    french_female = "fr-FR-DeniseNeural-Female"
     
-    # Voix par défaut pour l'Anglais (ou fallback)
+    # Voix par défaut pour l'Anglais (avec le suffixe SoniTranslate requis !)
     english_male = "en-US-AndrewMultilingualNeural-Male"
     english_female = "en-US-EmmaMultilingualNeural-Female"
 
