@@ -523,6 +523,8 @@ class SoniTranslate(SoniTrCache):
         custom_voices=False,
         custom_voices_workers=1,
         auto_detect_gender=False, # <--- DOIT ÊTRE ICI
+        default_male_voice="fr-FR-HenriNeural-Male",     # <--- AJOUTE CETTE LIGNE
+        default_female_voice="fr-FR-DeniseNeural-Female", # <--- AJOUTE CETTE LIGNE
         is_gui=False,             # <--- DOIT ÊTRE ICI
         progress=gr.Progress(),   # <--- DOIT RESTER TOUT À LA FIN
     ):
@@ -1065,7 +1067,12 @@ class SoniTranslate(SoniTrCache):
                         speaker_genders = detector.detect_speaker_genders(audio_for_detection, self.result_diarize)
                         
                         # Calcule le dictionnaire d'attribution des voix EdgeTTS
-                        assigned_voices = auto_assign_voices(speaker_genders, target_language=TRANSLATE_AUDIO_TO)
+                        assigned_voices = auto_assign_voices(
+                            speaker_genders, 
+                            target_language=TRANSLATE_AUDIO_TO,
+                            default_male=default_male_voice,
+                            default_female=default_female_voice
+                        )
                         
                         # On remplace à la volée les choix de voix manuels par les voix détectées par l'IA
                         tts_voice00 = assigned_voices.get("SPEAKER_00", tts_voice00)
@@ -2107,8 +2114,22 @@ def create_gui(theme, logs_in_gui=False):
                             )
                             auto_detect_gender_gui = gr.Checkbox(
                                 False,
-                                label="Auto-Detect Voice Gender (FR)",
-                                info="Détecte automatiquement le genre de chaque voix pour attribuer Henri (Homme) ou Denise (Femme) en français."
+                                label="Auto-Detect Voice Gender",
+                                info="Détecte automatiquement le genre de chaque voix et lui attribue la voix par défaut sélectionnée ci-dessous."
+                            )
+                            default_male_voice_gui = gr.Dropdown(
+                                choices=SoniTr.tts_info.tts_list(),
+                                value="fr-FR-HenriNeural-Male",
+                                label="Default Male Voice (Auto-Detect)",
+                                info="Voix masculine par défaut à utiliser lors de la détection automatique.",
+                                interactive=True
+                            )
+                            default_female_voice_gui = gr.Dropdown(
+                                choices=SoniTr.tts_info.tts_list(),
+                                value="fr-FR-DeniseNeural-Female",
+                                label="Default Female Voice (Auto-Detect)",
+                                info="Voix féminine par défaut à utiliser lors de la détection automatique.",
+                                interactive=True
                             )
                             
                             PREVIEW = gr.Checkbox(
@@ -2835,6 +2856,8 @@ def create_gui(theme, logs_in_gui=False):
                 enable_custom_voice,
                 workers_custom_voice,
                 auto_detect_gender_gui,
+                default_male_voice_gui,   # <--- AJOUTE CETTE LIGNE
+                default_female_voice_gui, # <--- AJOUTE CETTE LIGNE
                 is_gui_dummy_check,
             ],
             outputs=subs_edit_space,
@@ -2903,6 +2926,8 @@ def create_gui(theme, logs_in_gui=False):
                 enable_custom_voice,
                 workers_custom_voice,
                 auto_detect_gender_gui,
+                default_male_voice_gui,   # <--- AJOUTE CETTE LIGNE
+                default_female_voice_gui, # <--- AJOUTE CETTE LIGNE
                 is_gui_dummy_check,
             ],
             outputs=video_output,
