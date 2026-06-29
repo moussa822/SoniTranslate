@@ -113,5 +113,9 @@ def auto_assign_voices(speaker_genders, target_language="french"):
             assigned_voices[speaker] = french_female if gender == "female" else french_male
         else:
             assigned_voices[speaker] = english_female if gender == "female" else english_male
+            # --- CAS 2 : L'utilisateur utilise Kokoro TTS ---
+        elif "kokoro" in voice_str:
+            assigned_voices[speaker] = "Kokoro/ff_sixtine" if gender == "female" else "Kokoro/fm_julien"
+
             
     return assigned_voices
