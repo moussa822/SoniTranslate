@@ -5,7 +5,6 @@ from transformers import pipeline
 from soni_translate.logging_setup import logger
 
 class VoiceGenderDetector:
-    # On passe sur un modèle multilingue d'une précision chirurgicale (F1 score: 0.9993)
     def __init__(self, model_id="alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech"):
         self.model_id = model_id
         self.classifier = None
@@ -55,7 +54,7 @@ class VoiceGenderDetector:
                 speaker_chunks.append(chunk)
                 accumulated_duration += duration
                 
-                if accumulated_duration >= 8.0:  # 8 secondes suffisent largement
+                if accumulated_duration >= 8.0:
                     break
 
             if not speaker_chunks:
@@ -65,7 +64,6 @@ class VoiceGenderDetector:
 
             combined_waveform = torch.cat(speaker_chunks, dim=1)
             
-            # Étape essentielle : Ré-échantillonnage à 16000 Hz pour la compatibilité absolue avec Wav2Vec2
             if sample_rate != 16000:
                 transform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
                 combined_waveform = transform(combined_waveform)
@@ -73,39 +71,39 @@ class VoiceGenderDetector:
             # Conversion en Mono
             mono_waveform = combined_waveform.mean(dim=0, keepdim=True)
             
-            # Sauvegarde d'un fichier WAV temporaire propre pour l'analyse
+            # --- AJOUT : NORMALISATION DE VOLUME ---
+            # Si le volume de l'extrait est trop bas, on le remonte à un niveau standard (0.9)
+            # pour que l'IA entende parfaitement la voix sans distorsion.
+            peak = torch.max(torch.abs(mono_waveform))
+            if peak > 0.0:
+                mono_waveform = (mono_waveform / peak) * 0.9
+
             temp_wav_path = f"temp_gender_{speaker}.wav"
             torchaudio.save(temp_wav_path, mono_waveform, 16000)
 
             try:
-                # Analyse directe du fichier propre
                 predictions = self.classifier(temp_wav_path)
-                gender_label = predictions[0]["label"].lower() # 'male' ou 'female'
+                gender_label = predictions[0]["label"].lower()
                 speaker_genders[speaker] = gender_label
                 logger.info(f"Gender detected for {speaker}: {gender_label} (Confidence: {predictions[0]['score']:.2f})")
             except Exception as e:
                 logger.error(f"Failed to detect gender for {speaker}: {e}")
                 speaker_genders[speaker] = "unknown"
             finally:
-                # Nettoyage immédiat du fichier temporaire
                 if os.path.exists(temp_wav_path):
                     os.remove(temp_wav_path)
 
-        return speaker_genders
+            return speaker_genders
 
 
 def auto_assign_voices(speaker_genders, target_language="french"):
-    """
-    Assigne automatiquement des voix EdgeTTS de référence
-    en fonction du genre détecté et de la langue cible.
-    """
     lang = target_language.lower()
     
-    # Voix par défaut pour le Français (avec le suffixe SoniTranslate requis !)
+    # Voix par défaut pour le Français
     french_male = "fr-FR-HenriNeural-Male"
     french_female = "fr-FR-DeniseNeural-Female"
     
-    # Voix par défaut pour l'Anglais (avec le suffixe SoniTranslate requis !)
+    # Voix par défaut pour l'Anglais
     english_male = "en-US-AndrewMultilingualNeural-Male"
     english_female = "en-US-EmmaMultilingualNeural-Female"
 
