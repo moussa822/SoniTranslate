@@ -100,12 +100,34 @@ import sys
 import os
 
 # ==============================================================================
-# MONKEY-PATCH : SYSTÈME D'INTÉGRATION KOKORO TTS (BETA)
+# MONKEY-PATCH : SYSTÈME D'INTÉGRATION KOKORO TTS DYNAMIQUE (UNIVERSAL)
 # ==============================================================================
 import soni_translate.text_to_speech
 
 # Sauvegarde de la fonction de génération originale
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
+
+def get_kokoro_lang_code(target_lang):
+    """Mappe la langue de SoniTranslate vers le code phonétique de Kokoro"""
+    lang = target_lang.lower()
+    if "french" in lang or "fr" in lang:
+        return 'f' # Français
+    elif "spanish" in lang or "es" in lang:
+        return 'e' # Espagnol
+    elif "japanese" in lang or "ja" in lang:
+        return 'j' # Japonais
+    elif "chinese" in lang or "zh" in lang:
+        return 'z' # Chinois
+    elif "italian" in lang or "it" in lang:
+        return 'i' # Italien
+    elif "portuguese" in lang or "pt" in lang:
+        return 'p' # Portugais
+    elif "hindi" in lang or "hi" in lang:
+        return 'h' # Hindi
+    elif "british" in lang or "english (uk)" in lang:
+        return 'b' # Anglais Britannique
+    else:
+        return 'a' # Anglais Américain (Fallback par défaut)
 
 def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs):
     tts_voices = list(args[:12])
@@ -114,10 +136,8 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
     has_kokoro = any(isinstance(v, str) and v.startswith("Kokoro/") for v in tts_voices)
     
     if not has_kokoro:
-        # Si pas de Kokoro, on laisse tourner le moteur d'origine à 100%
         return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
     
-    # Initialisation de Kokoro de manière sécurisée (uniquement si demandé)
     import os
     import torch
     import soundfile as sf
@@ -126,13 +146,15 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
     logger = logging.getLogger("soni_translate")
     logger.info("Initializing Kokoro TTS Engine...")
     
-    lang_code = 'f' if 'fr' in TRANSLATE_AUDIO_TO.lower() or 'french' in TRANSLATE_AUDIO_TO.lower() else 'a'
+    # Détection DYNAMIQUE de la langue cible
+    lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
+    logger.info(f"Kokoro target language code resolved to: '{lang_code}' for '{TRANSLATE_AUDIO_TO}'")
+    
     pipeline = KPipeline(lang_code=lang_code)
     
     os.makedirs("audio", exist_ok=True)
     valid_speakers = []
     
-    # On traite les segments un par un
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
         speaker_idx = int(speaker[-2:]) if speaker.startswith("SPEAKER_") else 0
@@ -154,20 +176,17 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 
                 if audio_pieces:
                     combined_audio = torch.cat(audio_pieces).numpy()
-                    # Enregistrement natif à 24000Hz (format attendu par SoniTranslate)
                     sf.write(output_file, combined_audio, 24000)
                     
                 if speaker not in valid_speakers:
                     valid_speakers.append(speaker)
             except Exception as e:
                 logger.error(f"Error generating Kokoro segment {start}: {str(e)}")
-                # Fallback d'urgence segment par segment sur le moteur original si Kokoro plante
                 temp_diarize = {"segments": [segment]}
                 original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
                 if speaker not in valid_speakers:
                     valid_speakers.append(speaker)
         else:
-            # Si ce speaker n'utilise pas Kokoro, on génère son segment via l'outil d'origine
             temp_diarize = {"segments": [segment]}
             original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
             if speaker not in valid_speakers:
@@ -178,6 +197,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
 # Application dynamique du Patch
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
+
 
 directories = [
     "downloads",
@@ -212,13 +232,45 @@ class TTS_Info:
         self.list_coqui_xtts = (
             coqui_xtts_voices_list() if self.xtts_enabled else []
         )
-        # NOUVELLE VARIABLE : Nos voix Kokoro
+        
+        # Liste étendue des meilleures voix internationales Kokoro
         list_kokoro = [
-            "Kokoro/ff_sixtine", # Voix française féminine sublime
-            "Kokoro/fm_julien",  # Voix française masculine naturelle
-            "Kokoro/af_sarah",   # Voix anglaise féminine
-            "Kokoro/am_adam"     # Voix anglaise masculine
+            # --- FRANÇAIS ---
+            "Kokoro/ff_sixtine", # Femme (FR)
+            "Kokoro/fm_julien",  # Homme (FR)
+            
+            # --- ANGLAIS (US) ---
+            "Kokoro/af_sarah",   # Femme (US)
+            "Kokoro/af_nicole",  # Femme (US)
+            "Kokoro/af_sky",     # Femme (US)
+            "Kokoro/am_adam",    # Homme (US)
+            "Kokoro/am_michael", # Homme (US)
+            
+            # --- ANGLAIS (UK) ---
+            "Kokoro/bf_emma",    # Femme (UK)
+            "Kokoro/bm_george",  # Homme (UK)
+            
+            # --- ESPAGNOL ---
+            "Kokoro/ef_madrid",  # Femme (ES)
+            "Kokoro/em_barcelona",# Homme (ES)
+            
+            # --- ITALIEN ---
+            "Kokoro/if_sara",    # Femme (IT)
+            "Kokoro/im_nicola",  # Homme (IT)
+            
+            # --- PORTUGAIS ---
+            "Kokoro/pf_sara",    # Femme (PT)
+            "Kokoro/pm_lucas",   # Homme (PT)
+            
+            # --- JAPONAIS ---
+            "Kokoro/jf_alpha",   # Femme (JP)
+            "Kokoro/jm_beta",    # Homme (JP)
+            
+            # --- CHINOIS ---
+            "Kokoro/zf_xiaobei", # Femme (ZH)
+            "Kokoro/zm_xiaoni"   # Homme (ZH)
         ]
+        
         list_tts = self.list_coqui_xtts + list_kokoro + sorted(
             self.list_edge
             + (self.list_bark if os.environ.get("ZERO_GPU") != "TRUE" else [])
@@ -227,6 +279,7 @@ class TTS_Info:
             + self.list_vits_onnx
         )
         return list_tts
+
 
 
 def prog_disp(msg, percent, is_gui, progress=None):
