@@ -37,7 +37,7 @@ class VoiceGenderDetector:
             return {}
 
         speaker_genders = {}
-        total_frames = waveform.shape[1] # Sécurité : Taille max de l'audio d'origine
+        total_frames = waveform.shape[1]
 
         for speaker, segments in speaker_segments.items():
             speaker_chunks = []
@@ -48,7 +48,7 @@ class VoiceGenderDetector:
                 if duration < 0.5:
                     continue
                 
-                # Sécurité : on s'assure que les index calculés ne dépassent jamais la taille du fichier d'origine
+                # Sécurité : on borne les index pour éviter les dépassements de taille de l'audio
                 start_frame = min(int(start * sample_rate), total_frames)
                 end_frame = min(int(end * sample_rate), total_frames)
                 
@@ -59,7 +59,7 @@ class VoiceGenderDetector:
                 speaker_chunks.append(chunk)
                 accumulated_duration += duration
                 
-                if accumulated_duration >= 8.0:  # Échantillon de 8 secondes cumulées
+                if accumulated_duration >= 8.0:
                     break
 
             if not speaker_chunks:
@@ -76,7 +76,7 @@ class VoiceGenderDetector:
             # Conversion en Mono
             mono_waveform = combined_waveform.mean(dim=0, keepdim=True)
             
-            # Normalisation du volume (Peak Normalization à 0.9)
+            # Normalisation du volume
             peak = torch.max(torch.abs(mono_waveform))
             if peak > 0.0:
                 mono_waveform = (mono_waveform / peak) * 0.9
@@ -96,7 +96,6 @@ class VoiceGenderDetector:
                 if os.path.exists(temp_wav_path):
                     os.remove(temp_wav_path)
 
-        # RETOUR HORS DE LA BOUCLE : On renvoie le dictionnaire complet seulement après avoir analysé TOUS les locuteurs !
         return speaker_genders
 
 
