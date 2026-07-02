@@ -132,6 +132,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
     import os
     import torch
     import requests
+    import logging
     import soundfile as sf
     from kokoro import KPipeline
     from google import genai
@@ -210,7 +211,6 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 eleven_key = os.getenv("ELEVEN_API_KEY") or os.getenv("eleven_api_key")
                 if not eleven_key: raise ValueError("No ELEVEN_API_KEY found")
                 
-                # IDs de secours des voix par défaut si l'utilisateur met un nom
                 voice_id_map = {
                     "rachel": "21m00Tcm4TlvDq8ikWAM",
                     "adam": "pNInz6obpgq9S3JmS12g",
@@ -244,9 +244,6 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
 # Application dynamique du Patch
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
-
-
-
 directories = [
     "downloads",
     "logs",
