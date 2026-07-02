@@ -3224,10 +3224,70 @@ if __name__ == "__main__":
 
     SoniTr = SoniTranslate(cpu_mode=args.cpu_mode)
 
+    # ==========================================================================
+    # MONKEY-PATCH : RE-DIRECTION DE LA LISTE DES VOIX DE L'INTERFACE WEB (BETA)
+    # ==========================================================================
+    original_tts_list_method = SoniTr.tts_info.tts_list
+
+    def patched_tts_list_method():
+        list_custom_voices = [
+            # --- KOKORO FRANÇAIS ---
+            "Kokoro/ff_siwis",   # Seule voix française officielle (Femme)
+            
+            # --- KOKORO ESPAGNOL ---
+            "Kokoro/ef_dora",    # Femme (ES)
+            "Kokoro/em_alex",    # Homme (ES)
+            "Kokoro/em_santa",   # Homme (ES)
+            
+            # --- KOKORO ITALIEN ---
+            "Kokoro/if_sara",    # Femme (IT)
+            "Kokoro/im_nicola",  # Homme (IT)
+            
+            # --- KOKORO PORTUGAIS ---
+            "Kokoro/pf_dora",    # Femme (PT)
+            "Kokoro/pm_alex",    # Homme (PT)
+            "Kokoro/pm_santa",   # Homme (PT)
+            
+            # --- KOKORO ANGLAIS (US) ---
+            "Kokoro/af_sarah",   # Femme (US)
+            "Kokoro/af_nicole",  # Femme (US)
+            "Kokoro/af_sky",     # Femme (US)
+            "Kokoro/am_adam",    # Homme (US)
+            "Kokoro/am_michael", # Homme (US)
+            
+            # --- KOKORO ANGLAIS (UK) ---
+            "Kokoro/bf_emma",    # Femme (UK)
+            "Kokoro/bm_george",  # Homme (UK)
+            
+            # --- KOKORO JAPONAIS ---
+            "Kokoro/jf_alpha",   # Femme (JP)
+            "Kokoro/jm_beta",    # Homme (JP)
+            
+            # --- KOKORO CHINOIS ---
+            "Kokoro/zf_xiaobei", # Femme (ZH)
+            "Kokoro/zm_yunjian", # Homme (ZH)
+            
+            # --- GEMINI TTS ---
+            "Gemini/Aoede",      # Femme
+            "Gemini/Puck",       # Homme
+            "Gemini/Kore",       # Neutre / Femme
+            "Gemini/Fawkes",     # Neutre / Homme
+            
+            # --- ELEVENLABS ---
+            "ElevenLabs/Rachel",
+            "ElevenLabs/Adam",
+            "ElevenLabs/Antoni"
+        ]
+        # On fusionne la liste officielle de SoniTranslate avec nos voix personnalisées
+        return list_custom_voices + original_tts_list_method()
+
+    # On écrase la méthode pour que l'interface Gradio charge nos voix d'un coup
+    SoniTr.tts_info.tts_list = patched_tts_list_method
+    # ==========================================================================
+
     lg_conf = get_language_config(language_data, language=args.language)
 
     app = create_gui(args.theme, logs_in_gui=args.logs_in_gui)
-
     app.queue()
 
     app.launch(
