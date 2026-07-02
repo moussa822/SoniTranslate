@@ -108,6 +108,7 @@ import soni_translate.text_to_speech
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
 
 def get_kokoro_lang_code(target_lang):
+    """Mappe la langue de SoniTranslate vers le code phonétique de Kokoro"""
     lang = target_lang.lower()
     if "french" in lang or "fr" in lang: return 'f'
     elif "spanish" in lang or "es" in lang: return 'e'
@@ -126,13 +127,14 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
     has_custom_tts = any(isinstance(v, str) and (v.startswith("Kokoro/") or v.startswith("Gemini/") or v.startswith("ElevenLabs/")) for v in tts_voices)
     
     if not has_custom_tts:
-        # Fallback d'origine
+        # Fallback d'origine s'il n'y a aucune voix personnalisée demandée
         return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
     
     import os
     import torch
     import requests
     import logging
+    import numpy as np
     import soundfile as sf
     from kokoro import KPipeline
     from google import genai
@@ -161,13 +163,22 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                     lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
                     pipeline_kokoro = KPipeline(lang_code=lang_code)
                 
+                # Génération de l'audio
                 generator = pipeline_kokoro(text, voice=kokoro_voice, speed=1.0)
                 audio_pieces = []
+                
                 for _, _, audio in generator:
-                    audio_pieces.append(torch.from_numpy(audio))
+                    # Sécurité d'analyse des formats de sortie
+                    if isinstance(audio, torch.Tensor):
+                        audio_pieces.append(audio.cpu())
+                    elif isinstance(audio, np.ndarray):
+                        audio_pieces.append(torch.from_numpy(audio))
+                    else:
+                        audio_pieces.append(torch.tensor(audio))
                 
                 if audio_pieces:
                     combined_audio = torch.cat(audio_pieces).numpy()
+                    # Enregistrement natif à 24000Hz (format attendu par Kokoro)
                     sf.write(output_file, combined_audio, 24000)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
@@ -235,15 +246,16 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
         else:
+            # Fallback segment par segment sur le moteur original
             temp_diarize = {"segments": [segment]}
             original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
             if speaker not in valid_speakers: valid_speakers.append(speaker)
                 
     return valid_speakers
 
-# Application dynamique du Patch
+# Application dynamique du Patch (Mise à jour globale et locale de la référence)
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
-audio_segmentation_to_voice = patched_audio_segmentation_to_voice  # <--- AJOUTE CETTE LIGNE ESSENTIELLE 
+audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
 directories = [
     "downloads",
