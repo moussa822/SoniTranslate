@@ -279,34 +279,51 @@ class TTS_Info:
             coqui_xtts_voices_list() if self.xtts_enabled else []
         )
         
-        # Liste étendue des meilleures voix internationales Kokoro, Gemini, et ElevenLabs
+        # Liste exacte et corrigée des voix officielles de Kokoro v1.0
         list_custom_voices = [
             # --- KOKORO FRANÇAIS ---
-            "Kokoro/ff_sixtine", # Femme (FR)
-            "Kokoro/fm_julien",  # Homme (FR)
-            # --- KOKORO INTERNATIONAL ---
-            "Kokoro/af_sarah",   # Femme (US)
-            "Kokoro/am_adam",    # Homme (US)
-            "Kokoro/bf_emma",    # Femme (UK)
-            "Kokoro/bm_george",  # Homme (UK)
-            "Kokoro/ef_madrid",  # Femme (ES)
-            "Kokoro/em_barcelona",# Homme (ES)
+            "Kokoro/ff_siwis",   # Seule voix française officielle (Femme)
+            
+            # --- KOKORO ESPAGNOL ---
+            "Kokoro/ef_dora",    # Femme (ES)
+            "Kokoro/em_alex",    # Homme (ES)
+            "Kokoro/em_santa",   # Homme (ES)
+            
+            # --- KOKORO ITALIEN ---
             "Kokoro/if_sara",    # Femme (IT)
             "Kokoro/im_nicola",  # Homme (IT)
-            "Kokoro/pf_sara",    # Femme (PT)
-            "Kokoro/pm_lucas",   # Homme (PT)
+            
+            # --- KOKORO PORTUGAIS ---
+            "Kokoro/pf_dora",    # Femme (PT)
+            "Kokoro/pm_alex",    # Homme (PT)
+            "Kokoro/pm_santa",   # Homme (PT)
+            
+            # --- KOKORO ANGLAIS (US) ---
+            "Kokoro/af_sarah",   # Femme (US)
+            "Kokoro/af_nicole",  # Femme (US)
+            "Kokoro/af_sky",     # Femme (US)
+            "Kokoro/am_adam",    # Homme (US)
+            "Kokoro/am_michael", # Homme (US)
+            
+            # --- KOKORO ANGLAIS (UK) ---
+            "Kokoro/bf_emma",    # Femme (UK)
+            "Kokoro/bm_george",  # Homme (UK)
+            
+            # --- KOKORO JAPONAIS ---
             "Kokoro/jf_alpha",   # Femme (JP)
             "Kokoro/jm_beta",    # Homme (JP)
-            "Kokoro/zf_xiaobei", # Femme (ZH)
-            "Kokoro/zm_xiaoni",  # Homme (ZH)
             
-            # --- GEMINI TTS (Voix pré-construites) ---
+            # --- KOKORO CHINOIS ---
+            "Kokoro/zf_xiaobei", # Femme (ZH)
+            "Kokoro/zm_yunjian", # Homme (ZH)
+            
+            # --- GEMINI TTS ---
             "Gemini/Aoede",      # Femme
             "Gemini/Puck",       # Homme
             "Gemini/Kore",       # Neutre / Femme
             "Gemini/Fawkes",     # Neutre / Homme
             
-            # --- ELEVENLABS (Par défaut, ou insère l'ID de tes voix clonées) ---
+            # --- ELEVENLABS ---
             "ElevenLabs/Rachel",
             "ElevenLabs/Adam",
             "ElevenLabs/Antoni"
@@ -320,6 +337,7 @@ class TTS_Info:
             + self.list_vits_onnx
         )
         return list_tts
+
 
 
 
