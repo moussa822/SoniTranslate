@@ -2284,6 +2284,13 @@ def create_gui(theme, logs_in_gui=False):
                                 info="Sélectionnez la variante de modèle à utiliser pour les voix commençant par 'Gemini/'.",
                                 interactive=True
                             )
+                            
+                            PREVIEW = gr.Checkbox(
+                                label="Preview", info=lg_conf["preview_info"]
+                            )
+                            is_gui_dummy_check = gr.Checkbox(
+                                True, visible=False
+                            )
 
                 with gr.Column(variant="compact"):
                     edit_sub_check = gr.Checkbox(
