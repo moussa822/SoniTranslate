@@ -243,6 +243,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
 
 # Application dynamique du Patch
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
+audio_segmentation_to_voice = patched_audio_segmentation_to_voice  # <--- AJOUTE CETTE LIGNE ESSENTIELLE 
 # ==============================================================================
 directories = [
     "downloads",
