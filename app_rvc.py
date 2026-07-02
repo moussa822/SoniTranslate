@@ -100,7 +100,7 @@ import sys
 import os
 
 # ==============================================================================
-# MONKEY-PATCH : SYSTÈME D'INTÉGRATION KOKORO TTS DYNAMIQUE (UNIVERSAL)
+# MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS INTERNATIONALE (KOKORO / GEMINI / ELEVENLABS)
 # ==============================================================================
 import soni_translate.text_to_speech
 
@@ -108,52 +108,41 @@ import soni_translate.text_to_speech
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
 
 def get_kokoro_lang_code(target_lang):
-    """Mappe la langue de SoniTranslate vers le code phonétique de Kokoro"""
     lang = target_lang.lower()
-    if "french" in lang or "fr" in lang:
-        return 'f' # Français
-    elif "spanish" in lang or "es" in lang:
-        return 'e' # Espagnol
-    elif "japanese" in lang or "ja" in lang:
-        return 'j' # Japonais
-    elif "chinese" in lang or "zh" in lang:
-        return 'z' # Chinois
-    elif "italian" in lang or "it" in lang:
-        return 'i' # Italien
-    elif "portuguese" in lang or "pt" in lang:
-        return 'p' # Portugais
-    elif "hindi" in lang or "hi" in lang:
-        return 'h' # Hindi
-    elif "british" in lang or "english (uk)" in lang:
-        return 'b' # Anglais Britannique
-    else:
-        return 'a' # Anglais Américain (Fallback par défaut)
+    if "french" in lang or "fr" in lang: return 'f'
+    elif "spanish" in lang or "es" in lang: return 'e'
+    elif "japanese" in lang or "ja" in lang: return 'j'
+    elif "chinese" in lang or "zh" in lang: return 'z'
+    elif "italian" in lang or "it" in lang: return 'i'
+    elif "portuguese" in lang or "pt" in lang: return 'p'
+    elif "hindi" in lang or "hi" in lang: return 'h'
+    elif "british" in lang or "english (uk)" in lang: return 'b'
+    else: return 'a'
 
 def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs):
     tts_voices = list(args[:12])
     
-    # On regarde si au moins une voix "Kokoro/" est demandée
-    has_kokoro = any(isinstance(v, str) and v.startswith("Kokoro/") for v in tts_voices)
+    # On regarde si au moins une voix "externe" (Kokoro, Gemini ou ElevenLabs) est demandée
+    has_custom_tts = any(isinstance(v, str) and (v.startswith("Kokoro/") or v.startswith("Gemini/") or v.startswith("ElevenLabs/")) for v in tts_voices)
     
-    if not has_kokoro:
+    if not has_custom_tts:
+        # Fallback d'origine
         return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
     
     import os
     import torch
+    import requests
     import soundfile as sf
     from kokoro import KPipeline
+    from google import genai
+    from google.genai import types
     
     logger = logging.getLogger("soni_translate")
-    logger.info("Initializing Kokoro TTS Engine...")
-    
-    # Détection DYNAMIQUE de la langue cible
-    lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
-    logger.info(f"Kokoro target language code resolved to: '{lang_code}' for '{TRANSLATE_AUDIO_TO}'")
-    
-    pipeline = KPipeline(lang_code=lang_code)
-    
     os.makedirs("audio", exist_ok=True)
     valid_speakers = []
+    
+    # Initialisation de Kokoro si nécessaire
+    pipeline_kokoro = None
     
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
@@ -166,10 +155,12 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
         
         if isinstance(voice, str) and voice.startswith("Kokoro/"):
             kokoro_voice = voice.split("/")[-1]
-            
             try:
-                # Génération de l'audio via Kokoro
-                generator = pipeline(text, voice=kokoro_voice, speed=1.0)
+                if pipeline_kokoro is None:
+                    lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
+                    pipeline_kokoro = KPipeline(lang_code=lang_code)
+                
+                generator = pipeline_kokoro(text, voice=kokoro_voice, speed=1.0)
                 audio_pieces = []
                 for _, _, audio in generator:
                     audio_pieces.append(torch.from_numpy(audio))
@@ -177,26 +168,83 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 if audio_pieces:
                     combined_audio = torch.cat(audio_pieces).numpy()
                     sf.write(output_file, combined_audio, 24000)
-                    
-                if speaker not in valid_speakers:
-                    valid_speakers.append(speaker)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
-                logger.error(f"Error generating Kokoro segment {start}: {str(e)}")
+                logger.error(f"Kokoro Generation Error: {str(e)}")
                 temp_diarize = {"segments": [segment]}
                 original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
-                if speaker not in valid_speakers:
-                    valid_speakers.append(speaker)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+                
+        elif isinstance(voice, str) and voice.startswith("Gemini/"):
+            gemini_voice = voice.split("/")[-1]
+            try:
+                api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key")
+                if not api_key: raise ValueError("No GOOGLE_API_KEY found")
+                
+                # Récupération dynamique du modèle choisi par l'utilisateur (Flash ou Pro)
+                gemini_model = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+                
+                client = genai.Client(api_key=api_key)
+                config = types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config={"voice_config": {"prebuilt_voice_config": {"voice_name": gemini_voice}}}
+                )
+                response = client.models.generate_content(
+                    model=gemini_model,
+                    contents=text,
+                    config=config
+                )
+                audio_bytes = response.candidates[0].content.parts[0].inline_data.data
+                with open(output_file, "wb") as f:
+                    f.write(audio_bytes)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+            except Exception as e:
+                logger.error(f"Gemini TTS Generation Error: {str(e)}")
+                temp_diarize = {"segments": [segment]}
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+                
+        elif isinstance(voice, str) and voice.startswith("ElevenLabs/"):
+            eleven_voice = voice.split("/")[-1]
+            try:
+                eleven_key = os.getenv("ELEVEN_API_KEY") or os.getenv("eleven_api_key")
+                if not eleven_key: raise ValueError("No ELEVEN_API_KEY found")
+                
+                # IDs de secours des voix par défaut si l'utilisateur met un nom
+                voice_id_map = {
+                    "rachel": "21m00Tcm4TlvDq8ikWAM",
+                    "adam": "pNInz6obpgq9S3JmS12g",
+                    "antoni": "ErXwobaYiN019PkySvjV"
+                }
+                voice_id = voice_id_map.get(eleven_voice.lower(), eleven_voice)
+                
+                headers = {"xi-api-key": eleven_key, "Content-Type": "application/json"}
+                data = {"text": text, "model_id": "eleven_multilingual_v2", "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}}
+                
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+                response = requests.post(url, json=data, headers=headers)
+                if response.status_code == 200:
+                    with open(output_file, "wb") as f:
+                        f.write(response.content)
+                else:
+                    raise ValueError(f"ElevenLabs error: {response.text}")
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+            except Exception as e:
+                logger.error(f"ElevenLabs Generation Error: {str(e)}")
+                temp_diarize = {"segments": [segment]}
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
         else:
             temp_diarize = {"segments": [segment]}
             original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
-            if speaker not in valid_speakers:
-                valid_speakers.append(speaker)
+            if speaker not in valid_speakers: valid_speakers.append(speaker)
                 
     return valid_speakers
 
 # Application dynamique du Patch
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
+
 
 
 directories = [
@@ -233,45 +281,40 @@ class TTS_Info:
             coqui_xtts_voices_list() if self.xtts_enabled else []
         )
         
-        # Liste étendue des meilleures voix internationales Kokoro
-        list_kokoro = [
-            # --- FRANÇAIS ---
+        # Liste étendue des meilleures voix internationales Kokoro, Gemini, et ElevenLabs
+        list_custom_voices = [
+            # --- KOKORO FRANÇAIS ---
             "Kokoro/ff_sixtine", # Femme (FR)
             "Kokoro/fm_julien",  # Homme (FR)
-            
-            # --- ANGLAIS (US) ---
+            # --- KOKORO INTERNATIONAL ---
             "Kokoro/af_sarah",   # Femme (US)
-            "Kokoro/af_nicole",  # Femme (US)
-            "Kokoro/af_sky",     # Femme (US)
             "Kokoro/am_adam",    # Homme (US)
-            "Kokoro/am_michael", # Homme (US)
-            
-            # --- ANGLAIS (UK) ---
             "Kokoro/bf_emma",    # Femme (UK)
             "Kokoro/bm_george",  # Homme (UK)
-            
-            # --- ESPAGNOL ---
             "Kokoro/ef_madrid",  # Femme (ES)
             "Kokoro/em_barcelona",# Homme (ES)
-            
-            # --- ITALIEN ---
             "Kokoro/if_sara",    # Femme (IT)
             "Kokoro/im_nicola",  # Homme (IT)
-            
-            # --- PORTUGAIS ---
             "Kokoro/pf_sara",    # Femme (PT)
             "Kokoro/pm_lucas",   # Homme (PT)
-            
-            # --- JAPONAIS ---
             "Kokoro/jf_alpha",   # Femme (JP)
             "Kokoro/jm_beta",    # Homme (JP)
-            
-            # --- CHINOIS ---
             "Kokoro/zf_xiaobei", # Femme (ZH)
-            "Kokoro/zm_xiaoni"   # Homme (ZH)
+            "Kokoro/zm_xiaoni",  # Homme (ZH)
+            
+            # --- GEMINI TTS (Voix pré-construites) ---
+            "Gemini/Aoede",      # Femme
+            "Gemini/Puck",       # Homme
+            "Gemini/Kore",       # Neutre / Femme
+            "Gemini/Fawkes",     # Neutre / Homme
+            
+            # --- ELEVENLABS (Par défaut, ou insère l'ID de tes voix clonées) ---
+            "ElevenLabs/Rachel",
+            "ElevenLabs/Adam",
+            "ElevenLabs/Antoni"
         ]
         
-        list_tts = self.list_coqui_xtts + list_kokoro + sorted(
+        list_tts = self.list_coqui_xtts + list_custom_voices + sorted(
             self.list_edge
             + (self.list_bark if os.environ.get("ZERO_GPU") != "TRUE" else [])
             + self.list_vits
@@ -578,6 +621,7 @@ class SoniTranslate(SoniTrCache):
         auto_detect_gender=False, # <--- DOIT ÊTRE ICI
         default_male_voice="fr-FR-HenriNeural-Male",     # <--- AJOUTE CETTE LIGNE
         default_female_voice="fr-FR-DeniseNeural-Female", # <--- AJOUTE CETTE LIGNE
+        gemini_tts_model="gemini-2.5-flash-preview-tts", # <--- AJOUTÉ
         is_gui=False,             # <--- DOIT ÊTRE ICI
         progress=gr.Progress(),   # <--- DOIT RESTER TOUT À LA FIN
     ):
@@ -1161,6 +1205,50 @@ class SoniTranslate(SoniTrCache):
                         speaker_genders = detector.detect_speaker_genders(audio_for_detection, self.result_diarize)
                         
                         assigned_voices = auto_assign_voices(speaker_genders, target_language=TRANSLATE_AUDIO_TO)
+                        
+                        tts_voice00 = assigned_voices.get("SPEAKER_00", tts_voice00)
+                        tts_voice01 = assigned_voices.get("SPEAKER_01", tts_voice01)
+                        tts_voice02 = assigned_voices.get("SPEAKER_02", tts_voice02)
+                        tts_voice03 = assigned_voices.get("SPEAKER_03", tts_voice03)
+                        tts_voice04 = assigned_voices.get("SPEAKER_04", tts_voice04)
+                        tts_voice05 = assigned_voices.get("SPEAKER_05", tts_voice05)
+                        tts_voice06 = assigned_voices.get("SPEAKER_06", tts_voice06)
+                        tts_voice07 = assigned_voices.get("SPEAKER_07", tts_voice07)
+                        tts_voice08 = assigned_voices.get("SPEAKER_08", tts_voice08)
+                        tts_voice09 = assigned_voices.get("SPEAKER_09", tts_voice09)
+                        tts_voice10 = assigned_voices.get("SPEAKER_10", tts_voice10)
+                        tts_voice11 = assigned_voices.get("SPEAKER_11", tts_voice11)
+                        
+                        logger.info(f"Voices overridden automatically: SPEAKER_00={tts_voice00}, SPEAKER_01={tts_voice01}")
+                    else:
+                        logger.warning("Audio file not found for gender detection.")
+                except Exception as e:
+                    logger.error(f"Error in voice gender detector: {str(e)}")
+            # ==============================================================
+            # ==============================================================
+            # DÉBUT : INTERCEPTEUR POUR LA DÉTECTION DE GENRE AUTOMATIQUE
+            # ==============================================================
+            if auto_detect_gender:
+                try:
+                    prog_disp("Analyzing speaker genders automatically...", 0.75, is_gui, progress=progress)
+                    from soni_translate.gender_detection import VoiceGenderDetector, auto_assign_voices
+                    
+                    # On stocke le modèle Gemini sélectionné dans l'environnement pour que le patch de génération puisse le lire
+                    os.environ["GEMINI_TTS_MODEL"] = gemini_tts_model
+                    
+                    audio_for_detection = self.vocals if hasattr(self, 'vocals') and self.vocals else base_audio_wav
+                    
+                    if os.path.exists(audio_for_detection):
+                        detector = VoiceGenderDetector()
+                        speaker_genders = detector.detect_speaker_genders(audio_for_detection, self.result_diarize)
+                        
+                        # On appelle avec les voix par défaut choisies par l'utilisateur
+                        assigned_voices = auto_assign_voices(
+                            speaker_genders, 
+                            target_language=TRANSLATE_AUDIO_TO,
+                            default_male=default_male_voice,
+                            default_female=default_female_voice
+                        )
                         
                         tts_voice00 = assigned_voices.get("SPEAKER_00", tts_voice00)
                         tts_voice01 = assigned_voices.get("SPEAKER_01", tts_voice01)
@@ -2165,6 +2253,11 @@ def create_gui(theme, logs_in_gui=False):
                                 label=lg_conf["cache_label"],
                                 info=lg_conf["cache_info"],
                             )
+                            enable_cache_gui = gr.Checkbox(
+                                True,
+                                label=lg_conf["cache_label"],
+                                info=lg_conf["cache_info"],
+                            )
                             auto_detect_gender_gui = gr.Checkbox(
                                 False,
                                 label="Auto-Detect Voice Gender",
@@ -2184,12 +2277,12 @@ def create_gui(theme, logs_in_gui=False):
                                 info="Voix féminine par défaut à utiliser lors de la détection automatique.",
                                 interactive=True
                             )
-                            
-                            PREVIEW = gr.Checkbox(
-                                label="Preview", info=lg_conf["preview_info"]
-                            )
-                            is_gui_dummy_check = gr.Checkbox(
-                                True, visible=False
+                            gemini_tts_model_gui = gr.Dropdown(
+                                choices=["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"],
+                                value="gemini-2.5-flash-preview-tts",
+                                label="Gemini TTS Model Variant",
+                                info="Sélectionnez la variante de modèle à utiliser pour les voix commençant par 'Gemini/'.",
+                                interactive=True
                             )
 
                 with gr.Column(variant="compact"):
@@ -2911,6 +3004,7 @@ def create_gui(theme, logs_in_gui=False):
                 auto_detect_gender_gui,
                 default_male_voice_gui,   # <--- AJOUTE CETTE LIGNE
                 default_female_voice_gui, # <--- AJOUTE CETTE LIGNE
+                gemini_tts_model_gui,     # <--- AJOUTÉ
                 is_gui_dummy_check,
             ],
             outputs=subs_edit_space,
@@ -2981,6 +3075,7 @@ def create_gui(theme, logs_in_gui=False):
                 auto_detect_gender_gui,
                 default_male_voice_gui,   # <--- AJOUTE CETTE LIGNE
                 default_female_voice_gui, # <--- AJOUTE CETTE LIGNE
+                gemini_tts_model_gui,     # <--- AJOUTÉ
                 is_gui_dummy_check,
             ],
             outputs=video_output,
