@@ -183,8 +183,17 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
                 logger.error(f"Kokoro Generation Error: {str(e)}")
+                # --- SYSTÈME DE SECOURS ULTRA-ROBUSTE (FALLBACK) ---
+                lang_lower = TRANSLATE_AUDIO_TO.lower()
+                is_french = "french" in lang_lower or "fr" in lang_lower
+                fallback_voice = "fr-FR-DeniseNeural-Female" if is_french else "en-US-EmmaMultilingualNeural-Female"
+                
+                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start} to prevent crash.")
+                fallback_args = list(args)
+                fallback_args[speaker_idx] = fallback_voice
+                
                 temp_diarize = {"segments": [segment]}
-                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
                 
         elif isinstance(voice, str) and voice.startswith("Gemini/"):
@@ -212,8 +221,22 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
                 logger.error(f"Gemini TTS Generation Error: {str(e)}")
+                # --- SYSTÈME DE SECOURS ULTRA-ROBUSTE (FALLBACK) ---
+                lang_lower = TRANSLATE_AUDIO_TO.lower()
+                is_french = "french" in lang_lower or "fr" in lang_lower
+                is_female_voice = gemini_voice.lower() in ["aoede", "kore"]
+                
+                if is_french:
+                    fallback_voice = "fr-FR-DeniseNeural-Female" if is_female_voice else "fr-FR-HenriNeural-Male"
+                else:
+                    fallback_voice = "en-US-EmmaMultilingualNeural-Female" if is_female_voice else "en-US-AndrewMultilingualNeural-Male"
+                
+                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start} to prevent crash.")
+                fallback_args = list(args)
+                fallback_args[speaker_idx] = fallback_voice
+                
                 temp_diarize = {"segments": [segment]}
-                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
                 
         elif isinstance(voice, str) and voice.startswith("ElevenLabs/"):
@@ -242,8 +265,22 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
                 logger.error(f"ElevenLabs Generation Error: {str(e)}")
+                # --- SYSTÈME DE SECOURS ULTRA-ROBUSTE (FALLBACK) ---
+                lang_lower = TRANSLATE_AUDIO_TO.lower()
+                is_french = "french" in lang_lower or "fr" in lang_lower
+                is_female_voice = "rachel" in eleven_voice.lower()
+                
+                if is_french:
+                    fallback_voice = "fr-FR-DeniseNeural-Female" if is_female_voice else "fr-FR-HenriNeural-Male"
+                else:
+                    fallback_voice = "en-US-EmmaMultilingualNeural-Female" if is_female_voice else "en-US-AndrewMultilingualNeural-Male"
+                
+                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start} to prevent crash.")
+                fallback_args = list(args)
+                fallback_args[speaker_idx] = fallback_voice
+                
                 temp_diarize = {"segments": [segment]}
-                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
         else:
             # Fallback segment par segment sur le moteur original
