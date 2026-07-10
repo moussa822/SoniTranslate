@@ -100,25 +100,12 @@ import sys
 import os
 
 # ==============================================================================
-# MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS INTERNATIONALE (KOKORO / GEMINI / ELEVENLABS)
+# MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS INTERNATIONALE VIA API (KOKORO / GEMINI / ELEVENLABS)
 # ==============================================================================
 import soni_translate.text_to_speech
 
 # Sauvegarde de la fonction de génération originale
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
-
-def get_kokoro_lang_code(target_lang):
-    """Mappe la langue de SoniTranslate vers le code phonétique de Kokoro"""
-    lang = target_lang.lower()
-    if "french" in lang or "fr" in lang: return 'f'
-    elif "spanish" in lang or "es" in lang: return 'e'
-    elif "japanese" in lang or "ja" in lang: return 'j'
-    elif "chinese" in lang or "zh" in lang: return 'z'
-    elif "italian" in lang or "it" in lang: return 'i'
-    elif "portuguese" in lang or "pt" in lang: return 'p'
-    elif "hindi" in lang or "hi" in lang: return 'h'
-    elif "british" in lang or "english (uk)" in lang: return 'b'
-    else: return 'a'
 
 def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs):
     tts_voices = list(args[:12])
@@ -131,21 +118,15 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
         return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
     
     import os
-    import torch
     import requests
     import logging
-    import numpy as np
-    import soundfile as sf
-    from kokoro import KPipeline
+    from huggingface_hub import InferenceClient
     from google import genai
     from google.genai import types
     
     logger = logging.getLogger("soni_translate")
     os.makedirs("audio", exist_ok=True)
     valid_speakers = []
-    
-    # Initialisation de Kokoro si nécessaire
-    pipeline_kokoro = None
     
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
@@ -159,36 +140,30 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
         if isinstance(voice, str) and voice.startswith("Kokoro/"):
             kokoro_voice = voice.split("/")[-1]
             try:
-                if pipeline_kokoro is None:
-                    lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
-                    pipeline_kokoro = KPipeline(lang_code=lang_code)
+                # 1. On récupère le token Hugging Face que l'utilisateur a rentré dans l'interface
+                hf_token = os.getenv("YOUR_HF_TOKEN") or os.getenv("HF_TOKEN") or ""
+                client_hf = InferenceClient(token=hf_token)
                 
-                # Génération de l'audio
-                generator = pipeline_kokoro(text, voice=kokoro_voice, speed=1.0)
-                audio_pieces = []
+                # 2. Appel direct et instantané de la synthèse vocale hébergée sur Hugging Face !
+                audio_bytes = client_hf.text_to_speech(
+                    text,
+                    model="hexgrad/Kokoro-82M",
+                    extra_body={"voice": kokoro_voice}
+                )
                 
-                for _, _, audio in generator:
-                    # Sécurité d'analyse des formats de sortie
-                    if isinstance(audio, torch.Tensor):
-                        audio_pieces.append(audio.cpu())
-                    elif isinstance(audio, np.ndarray):
-                        audio_pieces.append(torch.from_numpy(audio))
-                    else:
-                        audio_pieces.append(torch.tensor(audio))
-                
-                if audio_pieces:
-                    combined_audio = torch.cat(audio_pieces).numpy()
-                    # Enregistrement natif à 24000Hz (format attendu par Kokoro)
-                    sf.write(output_file, combined_audio, 24000)
+                # 3. Sauvegarde directe des octets reçus
+                with open(output_file, "wb") as f:
+                    f.write(audio_bytes)
+                    
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
-                logger.error(f"Kokoro Generation Error: {str(e)}")
-                # --- SYSTÈME DE SECOURS ULTRA-ROBUSTE (FALLBACK) ---
+                logger.error(f"Hugging Face Kokoro API Error: {str(e)}")
+                # --- FALLBACK DE SECOURS AUTOMATIQUE ---
                 lang_lower = TRANSLATE_AUDIO_TO.lower()
                 is_french = "french" in lang_lower or "fr" in lang_lower
                 fallback_voice = "fr-FR-DeniseNeural-Female" if is_french else "en-US-EmmaMultilingualNeural-Female"
                 
-                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start} to prevent crash.")
+                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start}")
                 fallback_args = list(args)
                 fallback_args[speaker_idx] = fallback_voice
                 
@@ -202,7 +177,6 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key")
                 if not api_key: raise ValueError("No GOOGLE_API_KEY found")
                 
-                # Récupération dynamique du modèle choisi par l'utilisateur (Flash ou Pro)
                 gemini_model = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
                 
                 client = genai.Client(api_key=api_key)
@@ -221,7 +195,6 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
                 logger.error(f"Gemini TTS Generation Error: {str(e)}")
-                # --- SYSTÈME DE SECOURS ULTRA-ROBUSTE (FALLBACK) ---
                 lang_lower = TRANSLATE_AUDIO_TO.lower()
                 is_french = "french" in lang_lower or "fr" in lang_lower
                 is_female_voice = gemini_voice.lower() in ["aoede", "kore"]
@@ -231,12 +204,12 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 else:
                     fallback_voice = "en-US-EmmaMultilingualNeural-Female" if is_female_voice else "en-US-AndrewMultilingualNeural-Male"
                 
-                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start} to prevent crash.")
+                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start}")
                 fallback_args = list(args)
                 fallback_args[speaker_idx] = fallback_voice
                 
                 temp_diarize = {"segments": [segment]}
-                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
+                original_audio_segmentation_to_video = original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
                 
         elif isinstance(voice, str) and voice.startswith("ElevenLabs/"):
@@ -265,7 +238,6 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
                 logger.error(f"ElevenLabs Generation Error: {str(e)}")
-                # --- SYSTÈME DE SECOURS ULTRA-ROBUSTE (FALLBACK) ---
                 lang_lower = TRANSLATE_AUDIO_TO.lower()
                 is_french = "french" in lang_lower or "fr" in lang_lower
                 is_female_voice = "rachel" in eleven_voice.lower()
@@ -275,7 +247,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 else:
                     fallback_voice = "en-US-EmmaMultilingualNeural-Female" if is_female_voice else "en-US-AndrewMultilingualNeural-Male"
                 
-                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start} to prevent crash.")
+                logger.info(f"Fallback to EdgeTTS: Generating with '{fallback_voice}' for segment {start}")
                 fallback_args = list(args)
                 fallback_args[speaker_idx] = fallback_voice
                 
@@ -283,7 +255,6 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
         else:
-            # Fallback segment par segment sur le moteur original
             temp_diarize = {"segments": [segment]}
             original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
             if speaker not in valid_speakers: valid_speakers.append(speaker)
@@ -294,6 +265,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
+
 directories = [
     "downloads",
     "logs",
