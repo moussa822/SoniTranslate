@@ -5,14 +5,14 @@ from transformers import pipeline
 from soni_translate.logging_setup import logger
 
 class VoiceGenderDetector:
-    def __init__(self, model_id="norwoodsystems/norwood-maleVSfemale"):
+    def __init__(self, model_id="alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech"):
         self.model_id = model_id
         self.classifier = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def load_model(self):
         if self.classifier is None:
-            logger.info(f"Loading voice gender classification model: {self.model_id}")
+            logger.info(f"Loading multilingual voice gender classification model: {self.model_id}")
             self.classifier = pipeline(
                 "audio-classification",
                 model=self.model_id,
@@ -37,6 +37,7 @@ class VoiceGenderDetector:
             return {}
 
         speaker_genders = {}
+        total_frames = waveform.shape[1]
 
         for speaker, segments in speaker_segments.items():
             speaker_chunks = []
@@ -47,8 +48,11 @@ class VoiceGenderDetector:
                 if duration < 0.5:
                     continue
                 
-                start_frame = int(start * sample_rate)
-                end_frame = int(end * sample_rate)
+                start_frame = min(int(start * sample_rate), total_frames)
+                end_frame = min(int(end * sample_rate), total_frames)
+                
+                if start_frame >= end_frame:
+                    continue
                 
                 chunk = waveform[:, start_frame:end_frame]
                 speaker_chunks.append(chunk)
@@ -63,40 +67,39 @@ class VoiceGenderDetector:
                 continue
 
             combined_waveform = torch.cat(speaker_chunks, dim=1)
-            audio_mono = combined_waveform.mean(dim=0).numpy()
+            
+            if sample_rate != 16000:
+                transform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
+                combined_waveform = transform(combined_waveform)
+
+            mono_waveform = combined_waveform.mean(dim=0, keepdim=True)
+            
+            peak = torch.max(torch.abs(mono_waveform))
+            if peak > 0.0:
+                mono_waveform = (mono_waveform / peak) * 0.9
+
+            temp_wav_path = f"temp_gender_{speaker}.wav"
+            torchaudio.save(temp_wav_path, mono_waveform, 16000)
 
             try:
-                predictions = self.classifier({"raw": audio_mono, "sampling_rate": sample_rate})
+                predictions = self.classifier(temp_wav_path)
                 gender_label = predictions[0]["label"].lower()
                 speaker_genders[speaker] = gender_label
                 logger.info(f"Gender detected for {speaker}: {gender_label} (Confidence: {predictions[0]['score']:.2f})")
             except Exception as e:
                 logger.error(f"Failed to detect gender for {speaker}: {e}")
                 speaker_genders[speaker] = "unknown"
+            finally:
+                if os.path.exists(temp_wav_path):
+                    os.remove(temp_wav_path)
 
         return speaker_genders
 
-
-def auto_assign_voices(speaker_genders, target_language="french"):
-    """
-    Assigne automatiquement des voix de référence
-    en fonction du genre détecté et de la langue cible.
-    """
-    lang = target_language.lower()
-    
-    # Voix par défaut pour le Français
-    french_male = "fr-FR-HenriNeural"
-    french_female = "fr-FR-DeniseNeural"
-    
-    # Voix par défaut pour l'Anglais (ou fallback)
-    english_male = "en-US-AndrewMultilingualNeural-Male"
-    english_female = "en-US-EmmaMultilingualNeural-Female"
-
+def auto_assign_voices(speaker_genders, target_language="french", default_male="fr-FR-HenriNeural-Male", default_female="fr-FR-DeniseNeural-Female"):
     assigned_voices = {}
     for speaker, gender in speaker_genders.items():
-        if "french" in lang or "fr" in lang:
-            assigned_voices[speaker] = french_female if gender == "female" else french_male
+        if gender == "female":
+            assigned_voices[speaker] = default_female
         else:
-            assigned_voices[speaker] = english_female if gender == "female" else english_male
-            
+            assigned_voices[speaker] = default_male
     return assigned_voices
