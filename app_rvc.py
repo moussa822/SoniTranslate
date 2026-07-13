@@ -100,27 +100,46 @@ import sys
 import os
 
 # ==============================================================================
-# MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS INTERNATIONALE VIA API (KOKORO / GEMINI / ELEVENLABS)
+# MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS INTERNATIONALE LOCALE (KOKORO / GEMINI / ELEVENLABS)
 # ==============================================================================
 import soni_translate.text_to_speech
+
+# Cache global de session pour conserver les modèles de langues Kokoro en mémoire vive
+KOKORO_PIPELINES_CACHE = {}
 
 # Sauvegarde de la fonction de génération originale
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
 
+def get_kokoro_lang_code(target_lang):
+    """Mappe la langue de SoniTranslate vers le code phonétique de Kokoro"""
+    lang = target_lang.lower()
+    if "french" in lang or "fr" in lang: return 'f'
+    elif "spanish" in lang or "es" in lang: return 'e'
+    elif "japanese" in lang or "ja" in lang: return 'j'
+    elif "chinese" in lang or "zh" in lang: return 'z'
+    elif "italian" in lang or "it" in lang: return 'i'
+    elif "portuguese" in lang or "pt" in lang: return 'p'
+    elif "hindi" in lang or "hi" in lang: return 'h'
+    elif "british" in lang or "english (uk)" in lang: return 'b'
+    else: return 'a'
+
 def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs):
+    global KOKORO_PIPELINES_CACHE
     tts_voices = list(args[:12])
     
     # On regarde si au moins une voix "externe" (Kokoro, Gemini ou ElevenLabs) est demandée
     has_custom_tts = any(isinstance(v, str) and (v.startswith("Kokoro/") or v.startswith("Gemini/") or v.startswith("ElevenLabs/")) for v in tts_voices)
     
     if not has_custom_tts:
-        # Fallback d'origine s'il n'y a aucune voix personnalisée demandée
         return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
     
     import os
+    import torch
     import requests
     import logging
-    from huggingface_hub import InferenceClient
+    import numpy as np
+    import soundfile as sf
+    from kokoro import KPipeline
     from google import genai
     from google.genai import types
     
@@ -140,25 +159,31 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
         if isinstance(voice, str) and voice.startswith("Kokoro/"):
             kokoro_voice = voice.split("/")[-1]
             try:
-                # 1. On récupère le token Hugging Face que l'utilisateur a rentré dans l'interface
-                hf_token = os.getenv("YOUR_HF_TOKEN") or os.getenv("HF_TOKEN") or ""
-                client_hf = InferenceClient(token=hf_token)
+                lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
                 
-                # 2. Appel direct et instantané de la synthèse vocale hébergée sur Hugging Face !
-                audio_bytes = client_hf.text_to_speech(
-                    text,
-                    model="hexgrad/Kokoro-82M",
-                    extra_body={"voice": kokoro_voice}
-                )
+                # Chargement optimisé depuis le cache de session
+                if lang_code not in KOKORO_PIPELINES_CACHE:
+                    logger.info(f"Loading Kokoro pipeline for language: '{lang_code}'")
+                    KOKORO_PIPELINES_CACHE[lang_code] = KPipeline(lang_code=lang_code)
                 
-                # 3. Sauvegarde directe des octets reçus
-                with open(output_file, "wb") as f:
-                    f.write(audio_bytes)
-                    
+                pipeline = KOKORO_PIPELINES_CACHE[lang_code]
+                generator = pipeline(text, voice=kokoro_voice, speed=1.0)
+                audio_pieces = []
+                
+                for _, _, audio in generator:
+                    if isinstance(audio, torch.Tensor):
+                        audio_pieces.append(audio.cpu())
+                    elif isinstance(audio, np.ndarray):
+                        audio_pieces.append(torch.from_numpy(audio))
+                    else:
+                        audio_pieces.append(torch.tensor(audio))
+                
+                if audio_pieces:
+                    combined_audio = torch.cat(audio_pieces).numpy()
+                    sf.write(output_file, combined_audio, 24000)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
-                logger.error(f"Hugging Face Kokoro API Error: {str(e)}")
-                # --- FALLBACK DE SECOURS AUTOMATIQUE ---
+                logger.error(f"Kokoro Generation Error: {str(e)}")
                 lang_lower = TRANSLATE_AUDIO_TO.lower()
                 is_french = "french" in lang_lower or "fr" in lang_lower
                 fallback_voice = "fr-FR-DeniseNeural-Female" if is_french else "en-US-EmmaMultilingualNeural-Female"
@@ -209,7 +234,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 fallback_args[speaker_idx] = fallback_voice
                 
                 temp_diarize = {"segments": [segment]}
-                original_audio_segmentation_to_video = original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
                 if speaker not in valid_speakers: valid_speakers.append(speaker)
                 
         elif isinstance(voice, str) and voice.startswith("ElevenLabs/"):
@@ -265,7 +290,6 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
-
 directories = [
     "downloads",
     "logs",
@@ -3299,10 +3323,8 @@ if __name__ == "__main__":
             "ElevenLabs/Adam",
             "ElevenLabs/Antoni"
         ]
-        # On fusionne la liste officielle de SoniTranslate avec nos voix personnalisées
         return list_custom_voices + original_tts_list_method()
 
-    # On écrase la méthode pour que l'interface Gradio charge nos voix d'un coup
     SoniTr.tts_info.tts_list = patched_tts_list_method
     # ==========================================================================
 
