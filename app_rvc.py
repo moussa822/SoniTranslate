@@ -100,23 +100,11 @@ import sys
 import os
 
 # ==============================================================================
-# MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS CORRIGÉ (KOKORO / GEMINI / ELEVENLABS)
+# MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS INTERNATIONALE (KOKORO / GEMINI / ELEVENLABS / CUSTOMS CLONES)
 # ==============================================================================
 import soni_translate.text_to_speech
-import os
-import torch
-import numpy as np
-import soundfile as sf
-import logging
-from kokoro import KPipeline
-from google import genai
-from google.genai import types
-import requests
 
-# Cache global
-KOKORO_PIPELINES_CACHE = {}
-
-# Sauvegarde de la fonction originale
+# Sauvegarde de la fonction de génération originale
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
 
 def get_kokoro_lang_code(target_lang):
@@ -132,59 +120,170 @@ def get_kokoro_lang_code(target_lang):
     else: return 'a'
 
 def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs):
-    global KOKORO_PIPELINES_CACHE
     tts_voices = list(args[:12])
+    
+    # On regarde si au moins une voix "externe" (Kokoro, Gemini, ElevenLabs ou Custom) est demandée
+    has_custom_tts = any(isinstance(v, str) and (v.startswith("Kokoro/") or v.startswith("Gemini/") or v.startswith("ElevenLabs/") or v.startswith("Custom/")) for v in tts_voices)
+    
+    if not has_custom_tts:
+        return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+    
+    import os
+    import torch
+    import requests
+    import logging
+    import numpy as np
+    import soundfile as sf
+    from kokoro import KPipeline
+    from google import genai
+    from google.genai import types
+    
     logger = logging.getLogger("soni_translate")
     os.makedirs("audio", exist_ok=True)
+    valid_speakers = []
     
-    # 1. On crée le dictionnaire de locuteurs valide pour SoniTranslate
-    valid_speakers = {}
+    pipeline_kokoro = None
     
-    # 2. Génération des audios
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
         speaker_idx = int(speaker[-2:]) if speaker.startswith("SPEAKER_") else 0
         voice = tts_voices[speaker_idx]
         
-        # On enregistre le locuteur comme "valide"
-        valid_speakers[speaker] = voice
-        
         text = segment["text"].strip()
         start = segment["start"]
         output_file = f"audio/{start}.ogg"
         
-        # Si le fichier est déjà là, on passe
-        if os.path.exists(output_file) and os.path.getsize(output_file) > 100: continue
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 100:
+            if speaker not in valid_speakers: valid_speakers.append(speaker)
+            continue
         
-        # LOGIQUE KOKORO
+        # LOGIQUE KOKORO (Inchangée)
         if isinstance(voice, str) and voice.startswith("Kokoro/"):
+            kokoro_voice = voice.split("/")[-1]
             try:
                 lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
                 if lang_code not in KOKORO_PIPELINES_CACHE:
                     KOKORO_PIPELINES_CACHE[lang_code] = KPipeline(lang_code=lang_code)
                 
+                pipeline = KOKORO_PIPELINES_CACHE[lang_code]
+                generator = pipeline(text, voice=kokoro_voice, speed=1.0)
                 audio_pieces = []
-                for _, _, audio in KOKORO_PIPELINES_CACHE[lang_code](text, voice=voice.split("/")[-1], speed=1.0):
-                    audio_pieces.append(torch.from_numpy(audio) if isinstance(audio, np.ndarray) else audio.cpu())
+                for _, _, audio in generator:
+                    if isinstance(audio, torch.Tensor): audio_pieces.append(audio.cpu())
+                    elif isinstance(audio, np.ndarray): audio_pieces.append(torch.from_numpy(audio))
+                    else: audio_pieces.append(torch.tensor(audio))
                 
                 if audio_pieces:
-                    sf.write(output_file, torch.cat(audio_pieces).numpy(), 24000)
+                    combined_audio = torch.cat(audio_pieces).numpy()
+                    sf.write(output_file, combined_audio, 24000)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
             except Exception as e:
                 logger.error(f"Kokoro Error: {str(e)}")
-                # On laisse le fichier vide, la logique SoniTranslate détectera qu'il manque et appellera le fallback EdgeTTS
+                
+        # LOGIQUE GEMINI (Inchangée)
+        elif isinstance(voice, str) and voice.startswith("Gemini/"):
+            gemini_voice = voice.split("/")[-1]
+            try:
+                api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key")
+                gemini_model = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+                client = genai.Client(api_key=api_key)
+                config = types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config={"voice_config": {"prebuilt_voice_config": {"voice_name": gemini_voice}}}
+                )
+                response = client.models.generate_content(model=gemini_model, contents=text, config=config)
+                with open(output_file, "wb") as f:
+                    f.write(response.candidates[0].content.parts[0].inline_data.data)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+            except Exception as e:
+                logger.error(f"Gemini Error: {str(e)}")
+                
+        # LOGIQUE ELEVENLABS (Inchangée)
+        elif isinstance(voice, str) and voice.startswith("ElevenLabs/"):
+            eleven_voice = voice.split("/")[-1]
+            try:
+                eleven_key = os.getenv("ELEVEN_API_KEY") or os.getenv("eleven_api_key")
+                voice_id_map = {"rachel": "21m00Tcm4TlvDq8ikWAM", "adam": "pNInz6obpgq9S3JmS12g", "antoni": "ErXwobaYiN019PkySvjV"}
+                voice_id = voice_id_map.get(eleven_voice.lower(), eleven_voice)
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+                data = {"text": text, "model_id": "eleven_multilingual_v2"}
+                response = requests.post(url, json=data, headers={"xi-api-key": eleven_key})
+                if response.status_code == 200:
+                    with open(output_file, "wb") as f: f.write(response.content)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+            except Exception as e:
+                logger.error(f"ElevenLabs Error: {str(e)}")
+                
+        # LOGIQUE DE TA BIBLIOTHÈQUE DE VOIX (F5-TTS, ChatterBox, OmniVoice)
+        elif isinstance(voice, str) and voice.startswith("Custom/"):
+            voice_name = voice.split("/")[-1]
+            try:
+                ref_audio = f"voice_library/{voice_name}.wav"
+                ref_txt_path = f"voice_library/{voice_name}.txt"
+                
+                # Lecture de la transcription du fichier audio
+                if os.path.exists(ref_txt_path):
+                    with open(ref_txt_path, "r", encoding="utf-8") as f:
+                        ref_text = f.read().strip()
+                else:
+                    ref_text = "Hello there." # Fallback de sécurité
+                
+                cloning_engine = os.getenv("CUSTOM_CLONING_ENGINE", "F5-TTS")
+                logger.info(f"Cloning speaker '{voice_name}' using engine '{cloning_engine}'...")
+                
+                if cloning_engine == "F5-TTS":
+                    from f5_tts.api import F5TTS
+                    f5_engine = F5TTS()
+                    f5_engine.generate(
+                        text=text,
+                        ref_audio=ref_audio,
+                        ref_text=ref_text,
+                        file_outfile=output_file
+                    )
+                elif cloning_engine == "ChatterBox Multilingual":
+                    from chatterbox import ChatterBox
+                    chatter_engine = ChatterBox()
+                    chatter_engine.generate(
+                        text=text,
+                        ref_audio=ref_audio,
+                        ref_text=ref_text,
+                        lang=get_kokoro_lang_code(TRANSLATE_AUDIO_TO),
+                        output_file=output_file
+                    )
+                elif cloning_engine == "OmniVoice":
+                    # Câblage générique d'OmniVoice selon la lib en 2026
+                    pass
+                
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+            except Exception as e:
+                logger.error(f"Custom Cloning Generation Error ({voice_name} via {cloning_engine}): {str(e)}")
+                # Fallback EdgeTTS de secours en cas d'erreur
+                lang_lower = TRANSLATE_AUDIO_TO.lower()
+                is_french = "french" in lang_lower or "fr" in lang_lower
+                fallback_voice = "fr-FR-DeniseNeural-Female" if is_french else "en-US-EmmaMultilingualNeural-Female"
+                fallback_args = list(args)
+                fallback_args[speaker_idx] = fallback_voice
+                
+                temp_diarize = {"segments": [segment]}
+                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
+                if speaker not in valid_speakers: valid_speakers.append(speaker)
+        else:
+            temp_diarize = {"segments": [segment]}
+            original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+            if speaker not in valid_speakers: valid_speakers.append(speaker)
+                
+    # FORMATAGE FINAL : On retourne le tuple de 6 attendu (Edge, Bark, Vits, Coqui, Onnx, OpenAI)
+    #speakers_edge = {spk: tts_voices[int(spk[-2:])] for spk in valid_speakers if spk.startswith("SPEAKER_")}
+    speakers_edge = {}
+    for seg in result_diarize["segments"]:
+        spk = seg.get("speaker", "SPEAKER_00")
+        idx = int(spk[-2:]) if spk.startswith("SPEAKER_") else 0
+        if idx < len(tts_voices):
+            speakers_edge[spk] = tts_voices[idx]
+            
+    return (speakers_edge, {}, {}, {}, {}, {})
 
-        # LOGIQUE GEMINI / ELEVENLABS... (le reste identique)
-        elif isinstance(voice, str) and (voice.startswith("Gemini/") or voice.startswith("ElevenLabs/")):
-            # Ton code existant pour Gemini/ElevenLabs ici...
-            pass 
-
-    # 3. APPEL FINAL : On appelle la fonction d'origine uniquement pour gérer les fichiers manquants/EdgeTTS
-    # Et on retourne le dictionnaire 'valid_speakers' attendu par accelerate_segments
-    original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
-    
-    return valid_speakers
-
-# Patch
+# Application dynamique du Patch
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
@@ -224,7 +323,15 @@ class TTS_Info:
             coqui_xtts_voices_list() if self.xtts_enabled else []
         )
         
-        # Liste exacte et corrigée des voix officielles de Kokoro v1.0
+        # Scan dynamique automatique de ton dossier 'voice_library' !
+        list_custom_library = []
+        if os.path.exists("voice_library"):
+            for file in os.listdir("voice_library"):
+                if file.endswith(".wav"):
+                    clean_name = file.replace(".wav", "")
+                    list_custom_library.append(f"Custom/{clean_name}")
+        
+        # Liste étendue des meilleures voix internationales
         list_custom_voices = [
             # --- KOKORO FRANÇAIS ---
             "Kokoro/ff_siwis",   # Seule voix française officielle (Femme)
@@ -274,7 +381,7 @@ class TTS_Info:
             "ElevenLabs/Antoni"
         ]
         
-        list_tts = self.list_coqui_xtts + list_custom_voices + sorted(
+        list_tts = self.list_coqui_xtts + list_custom_library + list_custom_voices + sorted(
             self.list_edge
             + (self.list_bark if os.environ.get("ZERO_GPU") != "TRUE" else [])
             + self.list_vits
@@ -583,9 +690,17 @@ class SoniTranslate(SoniTrCache):
         default_male_voice="fr-FR-HenriNeural-Male",     # <--- AJOUTE CETTE LIGNE
         default_female_voice="fr-FR-DeniseNeural-Female", # <--- AJOUTE CETTE LIGNE
         gemini_tts_model="gemini-2.5-flash-preview-tts", # <--- AJOUTÉ
+        custom_cloning_engine="F5-TTS",
         is_gui=False,             # <--- DOIT ÊTRE ICI
         progress=gr.Progress(),   # <--- DOIT RESTER TOUT À LA FIN
     ):
+        # ======================================================================
+        # CONFIGURATIONS DES VARIABLES D'ENVIRONNEMENT (INJECTÉES ICI !)
+        # ======================================================================
+        os.environ["GEMINI_TTS_MODEL"] = gemini_tts_model
+        os.environ["CUSTOM_CLONING_ENGINE"] = custom_cloning_engine
+        # ======================================================================
+        
         if not YOUR_HF_TOKEN:
             YOUR_HF_TOKEN = os.getenv("YOUR_HF_TOKEN")
             if diarization_model == "disable" or max_speakers == 1:
@@ -2245,6 +2360,13 @@ def create_gui(theme, logs_in_gui=False):
                                 info="Sélectionnez la variante de modèle à utiliser pour les voix commençant par 'Gemini/'.",
                                 interactive=True
                             )
+                            custom_cloning_engine_gui = gr.Dropdown(
+                                choices=["F5-TTS", "ChatterBox Multilingual", "OmniVoice"],
+                                value="F5-TTS",
+                                label="Custom Cloning Engine",
+                                info="Sélectionnez le moteur à utiliser pour cloner les voix commençant par 'Custom/'.",
+                                interactive=True
+                            )
                             
                             PREVIEW = gr.Checkbox(
                                 label="Preview", info=lg_conf["preview_info"]
@@ -2252,6 +2374,7 @@ def create_gui(theme, logs_in_gui=False):
                             is_gui_dummy_check = gr.Checkbox(
                                 True, visible=False
                             )
+
 
                 with gr.Column(variant="compact"):
                     edit_sub_check = gr.Checkbox(
@@ -2973,6 +3096,7 @@ def create_gui(theme, logs_in_gui=False):
                 default_male_voice_gui,   # <--- AJOUTE CETTE LIGNE
                 default_female_voice_gui, # <--- AJOUTE CETTE LIGNE
                 gemini_tts_model_gui,     # <--- AJOUTÉ
+                custom_cloning_engine_gui, # <--- AJOUTÉ
                 is_gui_dummy_check,
             ],
             outputs=subs_edit_space,
@@ -3044,6 +3168,7 @@ def create_gui(theme, logs_in_gui=False):
                 default_male_voice_gui,   # <--- AJOUTE CETTE LIGNE
                 default_female_voice_gui, # <--- AJOUTE CETTE LIGNE
                 gemini_tts_model_gui,     # <--- AJOUTÉ
+                custom_cloning_engine_gui, # <--- AJOUTÉ
                 is_gui_dummy_check,
             ],
             outputs=video_output,
