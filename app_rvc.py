@@ -98,6 +98,53 @@ import time
 import hashlib
 import sys
 import os
+# ==============================================================================
+# MONKEY-PATCH : CACHE RAM DES AUDIOS DE RÉFÉRENCE (ANTI-REDONDANCE DISQUE)
+# ==============================================================================
+import torchaudio
+import soundfile as sf
+
+# Dictionnaires de cache globaux pour stocker les ondes sonores en RAM
+REF_TORCH_CACHE = {}
+REF_SF_CACHE = {}
+
+# Sauvegarde des fonctions originales de chargement
+original_torchaudio_load = torchaudio.load
+original_sf_read = sf.read
+
+def patched_torchaudio_load(filepath, *args, **kwargs):
+    global REF_TORCH_CACHE
+    # Si le fichier de ta bibliothèque de voix est déjà en mémoire vive, on le renvoie direct
+    if isinstance(filepath, str) and filepath in REF_TORCH_CACHE:
+        return REF_TORCH_CACHE[filepath]
+        
+    # Sinon on le charge normalement
+    waveform, sr = original_torchaudio_load(filepath, *args, **kwargs)
+    
+    # On ne met en cache que les fichiers de ta bibliothèque pour économiser la RAM
+    if isinstance(filepath, str) and "voice_library" in filepath:
+        REF_TORCH_CACHE[filepath] = (waveform, sr)
+        
+    return waveform, sr
+
+def patched_sf_read(file, *args, **kwargs):
+    global REF_SF_CACHE
+    # Même logique pour soundfile (utilisé par Chatterbox/OmniVoice)
+    if isinstance(file, str) and file in REF_SF_CACHE:
+        return REF_SF_CACHE[file]
+        
+    data, samplerate = original_sf_read(file, *args, **kwargs)
+    
+    if isinstance(file, str) and "voice_library" in file:
+        REF_SF_CACHE[file] = (data, samplerate)
+        
+    return data, samplerate
+
+# Application des intercepteurs
+torchaudio.load = patched_torchaudio_load
+sf.read = patched_sf_read
+# ==============================================================================
+
 
 # ==============================================================================
 # MONKEY-PATCH : SYSTÈME D'INTÉGRATION TTS INTERNATIONALE (KOKORO / GEMINI / ELEVENLABS / CUSTOMS CLONES)
