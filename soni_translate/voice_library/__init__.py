@@ -1,8 +1,8 @@
-from .omnivoice import OmniVoiceProvider
+from .custom import CustomCloningProvider
 
 # Enregistrement de nos Providers actifs
 PROVIDERS_REGISTRY = {
-    "Custom": OmniVoiceProvider()
+    "Custom": CustomCloningProvider()
 }
 
 def get_provider(voice_name):
@@ -15,3 +15,4 @@ def get_provider(voice_name):
         
     prefix = voice_name.split("/")[0] if "/" in voice_name else "Edge"
     return PROVIDERS_REGISTRY.get(prefix, None)
+
