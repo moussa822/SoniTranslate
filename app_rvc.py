@@ -3342,11 +3342,23 @@ if __name__ == "__main__":
     SoniTr = SoniTranslate(cpu_mode=args.cpu_mode)
 
     # ==========================================================================
-    # MONKEY-PATCH : RE-DIRECTION DE LA LISTE DES VOIX DE L'INTERFACE WEB (BETA)
+    # MONKEY-PATCH : RE-DIRECTION DE LA LISTE DES VOIX DE L'INTERFACE WEB (AVEC SCAN)
     # ==========================================================================
     original_tts_list_method = SoniTr.tts_info.tts_list
 
     def patched_tts_list_method():
+        import os
+        
+        # Scan dynamique automatique de ton dossier 'voice_library' !
+        list_custom_library = []
+        if os.path.exists("voice_library"):
+            for file in os.listdir("voice_library"):
+                if file.endswith(".wav"):
+                    # On retire l'extension .wav pour garder le nom propre (ex: ref_homme_fr)
+                    clean_name = file.replace(".wav", "")
+                    # On l'ajoute avec le préfixe "Custom/" attendu par le moteur
+                    list_custom_library.append(f"Custom/{clean_name}")
+        
         list_custom_voices = [
             # --- KOKORO FRANÇAIS ---
             "Kokoro/ff_siwis",   # Seule voix française officielle (Femme)
@@ -3380,7 +3392,7 @@ if __name__ == "__main__":
             "Kokoro/jf_alpha",   # Femme (JP)
             "Kokoro/jm_beta",    # Homme (JP)
             
-            # --- KOKORO CHINOIS ---
+            # --- CHINOIS ---
             "Kokoro/zf_xiaobei", # Femme (ZH)
             "Kokoro/zm_yunjian", # Homme (ZH)
             
@@ -3395,10 +3407,14 @@ if __name__ == "__main__":
             "ElevenLabs/Adam",
             "ElevenLabs/Antoni"
         ]
-        return list_custom_voices + original_tts_list_method()
+        
+        # On fusionne la liste dynamique de ta bibliothèque, les voix customisées et la liste d'origine
+        return list_custom_library + list_custom_voices + original_tts_list_method()
 
+    # On écrase la méthode pour que l'interface Gradio charge nos voix d'un coup
     SoniTr.tts_info.tts_list = patched_tts_list_method
     # ==========================================================================
+
 
     lg_conf = get_language_config(language_data, language=args.language)
 
