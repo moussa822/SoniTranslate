@@ -3342,24 +3342,26 @@ if __name__ == "__main__":
     SoniTr = SoniTranslate(cpu_mode=args.cpu_mode)
 
     # ==========================================================================
-    # MONKEY-PATCH : RE-DIRECTION DE LA LISTE DES VOIX DE L'INTERFACE WEB (AVEC SCAN)
+    # MONKEY-PATCH : RE-DIRECTION DE LA LISTE DES VOIX DE L'INTERFACE WEB (BÉTON ARMÉ)
     # ==========================================================================
     original_tts_list_method = SoniTr.tts_info.tts_list
 
     def patched_tts_list_method():
         import os
         
-        # Scan dynamique automatique de ton dossier 'voice_library' !
+        # Scan dynamique automatique de sécurité
         list_custom_library = []
         if os.path.exists("voice_library"):
             for file in os.listdir("voice_library"):
-                if file.endswith(".wav"):
-                    # On retire l'extension .wav pour garder le nom propre (ex: ref_homme_fr)
-                    clean_name = file.replace(".wav", "")
-                    # On l'ajoute avec le préfixe "Custom/" attendu par le moteur
+                if file.lower().endswith(('.wav', '.mp3')):
+                    clean_name = file.rsplit('.', 1)[0]
                     list_custom_library.append(f"Custom/{clean_name}")
         
         list_custom_voices = [
+            # --- TES VOIX DE RÉFÉRENCE FORCEES EN DUR (SÉCURITÉ UI) ---
+            "Custom/ref_homme_fr",
+            "Custom/ref_femme_fr",
+            
             # --- KOKORO FRANÇAIS ---
             "Kokoro/ff_siwis",   # Seule voix française officielle (Femme)
             
@@ -3408,10 +3410,16 @@ if __name__ == "__main__":
             "ElevenLabs/Antoni"
         ]
         
-        # On fusionne la liste dynamique de ta bibliothèque, les voix customisées et la liste d'origine
-        return list_custom_library + list_custom_voices + original_tts_list_method()
+        # On fusionne la bibliothèque dynamique, les voix forcées en dur et l'origine
+        # On utilise une liste propre pour éviter tout doublon si le fichier est présent sur le disque
+        full_list = list_custom_library + list_custom_voices
+        unique_list = []
+        for x in full_list:
+            if x not in unique_list:
+                unique_list.append(x)
+                
+        return unique_list + original_tts_list_method()
 
-    # On écrase la méthode pour que l'interface Gradio charge nos voix d'un coup
     SoniTr.tts_info.tts_list = patched_tts_list_method
     # ==========================================================================
 
