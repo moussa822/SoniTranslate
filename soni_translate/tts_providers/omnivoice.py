@@ -48,8 +48,9 @@ class OmniVoiceProvider(BaseTTSProvider):
         voice_name = voice.split("/")[-1]
         
         # Récupération de l'audio de référence et du texte associé dans ta Voice Library
-        ref_audio = f"voice_library/{voice_name}.wav"
-        ref_txt_path = f"voice_library/{voice_name}.txt"
+        project_root = "/content/SoniTranslate"
+        ref_audio = os.path.join(project_root, "voice_library", f"{voice_name}.wav")
+        ref_txt_path = os.path.join(project_root, "voice_library", f"{voice_name}.txt")
         
         if not os.path.exists(ref_audio):
             raise FileNotFoundError(f"Reference audio not found in voice library: {ref_audio}")
