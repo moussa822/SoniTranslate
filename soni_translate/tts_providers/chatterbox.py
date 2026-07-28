@@ -81,7 +81,8 @@ class ChatterBoxProvider(BaseTTSProvider):
         
         # Récupération de l'audio de référence
         voice_name = voice.split("/")[-1]
-        ref_audio = f"voice_library/{voice_name}.wav"
+        project_root = "/content/SoniTranslate"
+        ref_audio = os.path.join(project_root, "voice_library", f"{voice_name}.wav")
         
         if not os.path.exists(ref_audio):
             raise FileNotFoundError(f"Reference audio not found in voice library: {ref_audio}")
