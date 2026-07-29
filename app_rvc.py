@@ -104,12 +104,12 @@ import os
 import soni_translate.text_to_speech
 import os
 import torch
-import requests
-import logging
 import numpy as np
 import soundfile as sf
+import logging
 import hashlib
 import shutil
+import requests
 from kokoro import KPipeline
 from google import genai
 from google.genai import types
@@ -118,7 +118,7 @@ from google.genai import types
 if 'KOKORO_PIPELINES_CACHE' not in globals():
     KOKORO_PIPELINES_CACHE = {}
 
-# Sauvegarde de la fonction de génération originale
+# Sauvegarde de la fonction originale
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
 
 def get_kokoro_lang_code(target_lang):
@@ -139,13 +139,29 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
     tts_voices = list(args[:12])
     logger = logging.getLogger("soni_translate")
     
-    os.makedirs("audio", exist_ok=True)
+    # On regarde si au moins une voix "externe/custom" est demandée
+    has_custom_tts = any(isinstance(v, str) and (v.startswith("Kokoro/") or v.startswith("Gemini/") or v.startswith("ElevenLabs/") or v.startswith("Custom/")) for v in tts_voices)
     
-    # On s'assure que le dossier de notre cache persistant existe
+    if not has_custom_tts:
+        # Fallback classique immédiat si aucune voix IA n'est demandée
+        return original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+    
+    # --------------------------------------------------------------------------
+    # ÉTAPE 1 : ON LANCE D'ABORD LA GÉNÉRATION ORIGINALE EN UN SEUL BLOC
+    # Cela va vider le dossier 'audio' et générer proprement toutes les voix EdgeTTS de base.
+    # --------------------------------------------------------------------------
+    logger.info("Running baseline SoniTranslate TTS generation...")
+    original_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
+    
+    # --------------------------------------------------------------------------
+    # ÉTAPE 2 : NOTRE BOUCLE PASSE PAR-DESSUS ET ÉCRASE AVEC LES VOIX IA CUSTOM
+    # Comme on ne vide pas le dossier 'audio' ici, les voix de l'Étape 1 restent intactes !
+    # --------------------------------------------------------------------------
+    os.makedirs("audio", exist_ok=True)
     persistent_cache_dir = "persistent_cache"
     os.makedirs(persistent_cache_dir, exist_ok=True)
     
-    # 1. Préparation du dictionnaire de locuteurs (speakers_edge) requis par SoniTranslate
+    # Dictionnaire de locuteurs
     speakers_edge = {}
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
@@ -153,14 +169,21 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
         if speaker_idx < len(tts_voices):
             speakers_edge[speaker] = tts_voices[speaker_idx]
 
-    pipeline_kokoro = None
-    
-    # 2. Génération des fichiers audio segment par segment
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
         speaker_idx = int(speaker[-2:]) if speaker.startswith("SPEAKER_") else 0
         voice = tts_voices[speaker_idx]
         
+        # On ignore les voix qui ne sont pas des voix d'IA personnalisées (elles ont déjà été générées à l'Étape 1)
+        is_custom_voice = isinstance(voice, str) and (
+            voice.startswith("Kokoro/") or 
+            voice.startswith("Gemini/") or 
+            voice.startswith("ElevenLabs/") or 
+            voice.startswith("Custom/")
+        )
+        if not is_custom_voice:
+            continue
+            
         text = segment["text"].strip()
         start = segment["start"]
         output_file = f"audio/{start}.ogg"
@@ -175,13 +198,10 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
             shutil.copy(cache_file_path, output_file)
             continue
         
-        if os.path.exists(output_file) and os.path.getsize(output_file) > 100:
-            continue
-        
         generated_successfully = False
         
         # LOGIQUE KOKORO
-        if isinstance(voice, str) and voice.startswith("Kokoro/"):
+        if voice.startswith("Kokoro/"):
             kokoro_voice = voice.split("/")[-1]
             try:
                 lang_code = get_kokoro_lang_code(TRANSLATE_AUDIO_TO)
@@ -204,7 +224,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 logger.error(f"Kokoro Error: {str(e)}")
                 
         # LOGIQUE GEMINI
-        elif isinstance(voice, str) and voice.startswith("Gemini/"):
+        elif voice.startswith("Gemini/"):
             gemini_voice = voice.split("/")[-1]
             try:
                 api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key")
@@ -222,7 +242,7 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 logger.error(f"Gemini Error: {str(e)}")
                 
         # LOGIQUE ELEVENLABS
-        elif isinstance(voice, str) and voice.startswith("ElevenLabs/"):
+        elif voice.startswith("ElevenLabs/"):
             eleven_voice = voice.split("/")[-1]
             try:
                 eleven_key = os.getenv("ELEVEN_API_KEY") or os.getenv("eleven_api_key")
@@ -238,10 +258,9 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                 logger.error(f"ElevenLabs Error: {str(e)}")
                 
         # LOGIQUE DE TA BIBLIOTHÈQUE DE VOIX (F5-TTS, ChatterBox, OmniVoice)
-        elif isinstance(voice, str) and voice.startswith("Custom/"):
+        elif voice.startswith("Custom/"):
             voice_name = voice.split("/")[-1]
             try:
-                # Chemin absolu d'exécution sur Colab pour éviter les décalages de dossier d'exécution
                 project_root = "/content/SoniTranslate"
                 ref_audio = os.path.join(project_root, "voice_library", f"{voice_name}.wav")
                 ref_txt_path = os.path.join(project_root, "voice_library", f"{voice_name}.txt")
@@ -270,34 +289,21 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
                     if provider:
                         provider.generate(text, voice, TRANSLATE_AUDIO_TO, output_file)
                         generated_successfully = True
-                
             except Exception as e:
                 logger.error(f"Custom Cloning Error ({voice_name}): {str(e)}")
-                # Fallback EdgeTTS en cas d'erreur
-                lang_lower = TRANSLATE_AUDIO_TO.lower()
-                is_french = "french" in lang_lower or "fr" in lang_lower
-                fallback_voice = "fr-FR-DeniseNeural-Female" if is_french else "en-US-EmmaMultilingualNeural-Female"
-                fallback_args = list(args)
-                fallback_args[speaker_idx] = fallback_voice
-                
-                temp_diarize = {"segments": [segment]}
-                original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *fallback_args, **kwargs)
-        else:
-            temp_diarize = {"segments": [segment]}
-            original_audio_segmentation_to_voice(temp_diarize, TRANSLATE_AUDIO_TO, is_gui, *args, **kwargs)
-            generated_successfully = os.path.exists(output_file) and os.path.getsize(output_file) > 100
             
         # --- ÉTAPE B : ENREGISTREMENT DANS LE CACHE PERSISTANT APRÈS GÉNÉRATION ---
         if generated_successfully and os.path.exists(output_file):
             shutil.copy(output_file, cache_file_path)
 
-    # 3. FORMATAGE FINAL : On retourne le tuple de 6 attendu (Edge, Bark, Vits, Coqui, Onnx, OpenAI)
+    # On retourne le tuple de 6 attendu (Edge, Bark, Vits, Coqui, Onnx, OpenAI)
     return (speakers_edge, {}, {}, {}, {}, {})
 
 # Patch
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
+
 
 directories = [
     "downloads",
