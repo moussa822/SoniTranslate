@@ -99,73 +99,26 @@ import hashlib
 import sys
 import os
 # ==============================================================================
-# MONKEY-PATCH : CACHE RAM DES AUDIOS DE RÉFÉRENCE (ANTI-REDONDANCE DISQUE)
-# ==============================================================================
-import torchaudio
-import soundfile as sf
-
-# Dictionnaires de cache globaux pour stocker les ondes sonores en RAM
-REF_TORCH_CACHE = {}
-REF_SF_CACHE = {}
-
-# Sauvegarde des fonctions originales de chargement
-original_torchaudio_load = torchaudio.load
-original_sf_read = sf.read
-
-def patched_torchaudio_load(filepath, *args, **kwargs):
-    global REF_TORCH_CACHE
-    # Si le fichier de ta bibliothèque de voix est déjà en mémoire vive, on le renvoie direct
-    if isinstance(filepath, str) and filepath in REF_TORCH_CACHE:
-        return REF_TORCH_CACHE[filepath]
-        
-    # Sinon on le charge normalement
-    waveform, sr = original_torchaudio_load(filepath, *args, **kwargs)
-    
-    # On ne met en cache que les fichiers de ta bibliothèque pour économiser la RAM
-    if isinstance(filepath, str) and "voice_library" in filepath:
-        REF_TORCH_CACHE[filepath] = (waveform, sr)
-        
-    return waveform, sr
-
-def patched_sf_read(file, *args, **kwargs):
-    global REF_SF_CACHE
-    # Même logique pour soundfile (utilisé par Chatterbox/OmniVoice)
-    if isinstance(file, str) and file in REF_SF_CACHE:
-        return REF_SF_CACHE[file]
-        
-    data, samplerate = original_sf_read(file, *args, **kwargs)
-    
-    if isinstance(file, str) and "voice_library" in file:
-        REF_SF_CACHE[file] = (data, samplerate)
-        
-    return data, samplerate
-
-# Application des intercepteurs
-torchaudio.load = patched_torchaudio_load
-sf.read = patched_sf_read
-# ==============================================================================
-
-
-# ==============================================================================
 # MONKEY-PATCH : SYSTÈME DE ROUTAGE MODULAIRE TTS (KOKORO / GEMINI / ELEVENLABS / CLONES)
 # ==============================================================================
 import soni_translate.text_to_speech
 import os
 import torch
+import requests
+import logging
 import numpy as np
 import soundfile as sf
-import logging
 import hashlib
 import shutil
-import requests
 from kokoro import KPipeline
 from google import genai
 from google.genai import types
 
 # Cache de session pour ne pas recharger les modèles Kokoro en boucle
-KOKORO_PIPELINES_CACHE = {}
+if 'KOKORO_PIPELINES_CACHE' not in globals():
+    KOKORO_PIPELINES_CACHE = {}
 
-# Sauvegarde de la fonction originale
+# Sauvegarde de la fonction de génération originale
 original_audio_segmentation_to_voice = soni_translate.text_to_speech.audio_segmentation_to_voice
 
 def get_kokoro_lang_code(target_lang):
@@ -188,18 +141,21 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
     
     os.makedirs("audio", exist_ok=True)
     
-    # 1. On s'assure que le dossier de notre cache persistant existe
+    # On s'assure que le dossier de notre cache persistant existe
     persistent_cache_dir = "persistent_cache"
     os.makedirs(persistent_cache_dir, exist_ok=True)
     
-    # Préparation du dictionnaire de locuteurs requis par SoniTranslate
-    valid_speakers = {}
+    # 1. Préparation du dictionnaire de locuteurs (speakers_edge) requis par SoniTranslate
+    speakers_edge = {}
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
         speaker_idx = int(speaker[-2:]) if speaker.startswith("SPEAKER_") else 0
-        voice = tts_voices[speaker_idx]
-        valid_speakers[speaker] = voice
+        if speaker_idx < len(tts_voices):
+            speakers_edge[speaker] = tts_voices[speaker_idx]
 
+    pipeline_kokoro = None
+    
+    # 2. Génération des fichiers audio segment par segment
     for segment in result_diarize["segments"]:
         speaker = segment.get("speaker", "SPEAKER_00")
         speaker_idx = int(speaker[-2:]) if speaker.startswith("SPEAKER_") else 0
@@ -285,15 +241,38 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
         elif isinstance(voice, str) and voice.startswith("Custom/"):
             voice_name = voice.split("/")[-1]
             try:
-                # APPEL DE NOTRE SQUELETTE MODULAIRE PROPRE :
-                from soni_translate.tts_providers import get_provider
-                provider = get_provider(voice)
+                # Chemin absolu d'exécution sur Colab pour éviter les décalages de dossier d'exécution
+                project_root = "/content/SoniTranslate"
+                ref_audio = os.path.join(project_root, "voice_library", f"{voice_name}.wav")
+                ref_txt_path = os.path.join(project_root, "voice_library", f"{voice_name}.txt")
                 
-                if provider:
-                    provider.generate(text, voice, TRANSLATE_AUDIO_TO, output_file)
+                if os.path.exists(ref_txt_path):
+                    with open(ref_txt_path, "r", encoding="utf-8") as f:
+                        ref_text = f.read().strip()
+                else:
+                    ref_text = "Hello there."
+                
+                cloning_engine = os.getenv("CUSTOM_CLONING_ENGINE", "F5-TTS")
+                
+                if cloning_engine == "F5-TTS":
+                    from f5_tts.api import F5TTS
+                    f5_engine = F5TTS()
+                    f5_engine.generate(text=text, ref_audio=ref_audio, ref_text=ref_text, file_outfile=output_file)
                     generated_successfully = True
+                elif cloning_engine == "ChatterBox Multilingual":
+                    from chatterbox import ChatterBox
+                    chatter_engine = ChatterBox()
+                    chatter_engine.generate(text=text, ref_audio=ref_audio, ref_text=ref_text, lang=get_kokoro_lang_code(TRANSLATE_AUDIO_TO), output_file=output_file)
+                    generated_successfully = True
+                elif cloning_engine == "OmniVoice":
+                    from soni_translate.tts_providers import get_provider
+                    provider = get_provider(voice)
+                    if provider:
+                        provider.generate(text, voice, TRANSLATE_AUDIO_TO, output_file)
+                        generated_successfully = True
+                
             except Exception as e:
-                logger.error(f"Custom Cloning Generation Error ({voice_name}): {str(e)}")
+                logger.error(f"Custom Cloning Error ({voice_name}): {str(e)}")
                 # Fallback EdgeTTS en cas d'erreur
                 lang_lower = TRANSLATE_AUDIO_TO.lower()
                 is_french = "french" in lang_lower or "fr" in lang_lower
@@ -312,14 +291,13 @@ def patched_audio_segmentation_to_voice(result_diarize, TRANSLATE_AUDIO_TO, is_g
         if generated_successfully and os.path.exists(output_file):
             shutil.copy(output_file, cache_file_path)
 
-    return valid_speakers
+    # 3. FORMATAGE FINAL : On retourne le tuple de 6 attendu (Edge, Bark, Vits, Coqui, Onnx, OpenAI)
+    return (speakers_edge, {}, {}, {}, {}, {})
 
 # Patch
 soni_translate.text_to_speech.audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 audio_segmentation_to_voice = patched_audio_segmentation_to_voice
 # ==============================================================================
-
-
 
 directories = [
     "downloads",
