@@ -1,17 +1,22 @@
 import os
 import torch
-import soundfile as sf
+import torchaudio
 from .base import BaseTTSProvider
 
-# Cache global de session pour garder Chatterbox chargé en mémoire vive
+# Cache de session global pour conserver le modèle chargé en VRAM
 CHATTERBOX_MODEL_CACHE = None
 
 class ChatterBoxProvider(BaseTTSProvider):
     def __init__(self):
         super().__init__()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Dossier de stockage des modèles Chatterbox sur SoniTranslate
-        self.local_dir = "weights/ChatterBox"
+        
+        # Détection automatique du meilleur processeur disponible (CUDA, MPS ou CPU)
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
 
     def get_language_id(self, target_lang):
         """Mappe la langue de SoniTranslate vers le code ISO à 2 lettres de Chatterbox"""
@@ -40,47 +45,26 @@ class ChatterBoxProvider(BaseTTSProvider):
         else: return "en"
 
     def load_model(self):
-        """Charge le modèle Chatterbox en VRAM une seule fois."""
+        """Charge le modèle Chatterbox en mémoire vive une seule fois."""
         global CHATTERBOX_MODEL_CACHE
         if CHATTERBOX_MODEL_CACHE is None:
-            self.logger.info("Initializing Chatterbox Multilingual V3 model...")
+            self.logger.info(f"Initializing Chatterbox Multilingual V3 model on '{self.device}'...")
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
             
-            os.makedirs(self.local_dir, exist_ok=True)
-            
-            # Téléchargement automatique depuis Hugging Face si les fichiers essentiels manquent
-            from huggingface_hub import snapshot_download
-            allow_list = [
-                "ve.pt", 
-                "t3_mtl23ls_v3.safetensors", 
-                "s3gen.pt", 
-                "grapheme_mtl_merged_expanded_v1.json", 
-                "conds.pt", 
-                "Cangjie5_TC.json"
-            ]
-            
-            if not any(f in os.listdir(self.local_dir) for f in ["ve.pt", "s3gen.pt"]):
-                self.logger.info("Downloading Chatterbox model files from Hugging Face...")
-                snapshot_download(
-                    repo_id="resembleAI/chatterbox",
-                    local_dir=self.local_dir,
-                    allow_patterns=allow_list,
-                    local_dir_use_symlinks=False
-                )
-            
-            # Initialisation
-            CHATTERBOX_MODEL_CACHE = ChatterboxMultilingualTTS.from_local(
-                self.local_dir,
+            # Utilisation de la méthode native et robuste de téléchargement automatique
+            CHATTERBOX_MODEL_CACHE = ChatterboxMultilingualTTS.from_pretrained(
                 device=self.device,
-                t3_model="v3" # Utilisation forcée de la V3
+                t3_model="v3" # Chargement forcé de la dernière V3
             )
         return CHATTERBOX_MODEL_CACHE
 
     def generate(self, text, voice, target_lang, output_file, **kwargs):
         model = self.load_model()
         
-        # Récupération de l'audio de référence
+        # Le nom de la voix passée est sous la forme : "Custom/ref_homme_fr"
         voice_name = voice.split("/")[-1]
+        
+        # Chemin absolu d'exécution sur Colab pour éviter les décalages de dossier
         project_root = "/content/SoniTranslate"
         ref_audio = os.path.join(project_root, "voice_library", f"{voice_name}.wav")
         
@@ -89,11 +73,19 @@ class ChatterBoxProvider(BaseTTSProvider):
             
         lang_id = self.get_language_id(target_lang)
         
-        # Récupération des paramètres d'exagération et de fidélité (0.5 par défaut)
+        # Paramètres d'expressivité de base (recommandés par Resemble AI)
         exaggeration = kwargs.get("exaggeration", 0.5)
         cfg_weight = kwargs.get("cfg_weight", 0.5)
         
-        # Génération
+        # --- SÉCURITÉ DE TRANSFERT D'ACCENT (L'astuce de pro !) ---
+        # Si on fait du cross-lingual (voix fr parlant anglais), on coupe le cfg_weight
+        # pour annuler le transfert d'accent français et garder l'anglais natif !
+        is_cross_lingual = "fr" in voice_name.lower() and "en" in lang_id
+        if is_cross_lingual:
+            self.logger.info("Cross-lingual detected: setting cfg_weight to 0.0 to prevent French accent transfer.")
+            cfg_weight = 0.0
+            
+        # Génération directe via Chatterbox (renvoie un tenseur PyTorch)
         wav_tensor = model.generate(
             text,
             exaggeration=exaggeration,
@@ -102,12 +94,5 @@ class ChatterBoxProvider(BaseTTSProvider):
             audio_prompt_path=ref_audio
         )
         
-        # Conversion du tenseur PyTorch en NumPy
-        wav_tensor = wav_tensor.detach().cpu()
-        if wav_tensor.ndim == 2:
-            wav_np = wav_tensor.transpose(0, 1).numpy()
-        else:
-            wav_np = wav_tensor.numpy()
-            
-        # Enregistrement natif à 24 000 Hz
-        sf.write(output_file, wav_np, model.sr)
+        # Enregistrement natif ultra-stable à 24000Hz (sans conversion numpy)
+        torchaudio.save(output_file, wav_tensor.cpu(), model.sr)
