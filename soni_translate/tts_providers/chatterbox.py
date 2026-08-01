@@ -94,5 +94,11 @@ class ChatterBoxProvider(BaseTTSProvider):
             audio_prompt_path=ref_audio
         )
         
-        # Enregistrement natif ultra-stable à 24000Hz (sans conversion numpy)
-        torchaudio.save(output_file, wav_tensor.cpu(), model.sr)
+        # Enregistrement natif ultra-stable à 24000Hz avec soundfile (évite torchcodec)
+        wav_tensor = wav_tensor.detach().cpu()
+        if wav_tensor.ndim == 2:
+            wav_np = wav_tensor.transpose(0, 1).numpy()
+        else:
+            wav_np = wav_tensor.numpy()
+        sf.write(output_file, wav_np, model.sr)
+
