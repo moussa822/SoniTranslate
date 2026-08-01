@@ -1,6 +1,6 @@
 import os
 import torch
-import torchaudio
+import soundfile as sf
 from transformers import pipeline
 from soni_translate.logging_setup import logger
 
@@ -31,7 +31,16 @@ class VoiceGenderDetector:
                 speaker_segments[speaker].append((segment["start"], segment["end"]))
         
         try:
-            waveform, sample_rate = torchaudio.load(audio_path)
+            # SÉCURITÉ ABSOLUE : On utilise soundfile à la place de torchaudio pour éviter l'incompatibilité CUDA 13 / torchcodec
+            audio_data, sample_rate = sf.read(audio_path)
+            
+            # Conversion propre en tenseur PyTorch (channels, frames)
+            if audio_data.ndim == 1:
+                waveform = torch.from_numpy(audio_data).unsqueeze(0)
+            else:
+                waveform = torch.from_numpy(audio_data).transpose(0, 1)
+                
+            waveform = waveform.to(torch.float32)
         except Exception as e:
             logger.error(f"Error loading audio for gender detection: {e}")
             return {}
@@ -48,7 +57,6 @@ class VoiceGenderDetector:
                 if duration < 0.5:
                     continue
                 
-                # Sécurité : on borne les index pour éviter les dépassements de taille de l'audio
                 start_frame = min(int(start * sample_rate), total_frames)
                 end_frame = min(int(end * sample_rate), total_frames)
                 
@@ -69,7 +77,9 @@ class VoiceGenderDetector:
 
             combined_waveform = torch.cat(speaker_chunks, dim=1)
             
+            # Ré-échantillonnage à 16000 Hz pour la compatibilité avec Wav2Vec2
             if sample_rate != 16000:
+                import torchaudio
                 transform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
                 combined_waveform = transform(combined_waveform)
 
@@ -82,7 +92,10 @@ class VoiceGenderDetector:
                 mono_waveform = (mono_waveform / peak) * 0.9
 
             temp_wav_path = f"temp_gender_{speaker}.wav"
-            torchaudio.save(temp_wav_path, mono_waveform, 16000)
+            
+            # Écriture propre avec soundfile pour éviter torchaudio.save (qui charge aussi torchcodec)
+            audio_np = mono_waveform.squeeze(0).cpu().numpy()
+            sf.write(temp_wav_path, audio_np, 16000)
 
             try:
                 predictions = self.classifier(temp_wav_path)
@@ -100,10 +113,6 @@ class VoiceGenderDetector:
 
 
 def auto_assign_voices(speaker_genders, target_language="french", default_male="fr-FR-HenriNeural-Male", default_female="fr-FR-DeniseNeural-Female"):
-    """
-    Assigne automatiquement les voix sélectionnées par l'utilisateur
-    dans l'interface en fonction du genre détecté de manière universelle.
-    """
     assigned_voices = {}
     for speaker, gender in speaker_genders.items():
         if gender == "female":
