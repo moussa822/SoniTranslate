@@ -1,24 +1,4 @@
-# ==============================================================================
-# MONKEY-PATCH : COMPATIBILITÉ HUGGINGFACE HUB POUR WHISPERX/PYANNOTE (TRANSFORMERS 5+)
-# ==============================================================================
-import huggingface_hub
-import huggingface_hub.file_download
 
-_original_hf_download = huggingface_hub.hf_hub_download
-def robust_hf_download(*args, **kwargs):
-    if 'use_auth_token' in kwargs:
-        kwargs['token'] = kwargs.pop('use_auth_token')
-    return _original_hf_download(*args, **kwargs)
-
-_original_fd_hf_download = huggingface_hub.file_download.hf_hub_download
-def robust_fd_hf_download(*args, **kwargs):
-    if 'use_auth_token' in kwargs:
-        kwargs['token'] = kwargs.pop('use_auth_token')
-    return _original_fd_hf_download(*args, **kwargs)
-
-huggingface_hub.hf_hub_download = robust_hf_download
-huggingface_hub.file_download.hf_hub_download = robust_fd_hf_download
-# ==============================================================================
 import gradio as gr
 from soni_translate.logging_setup import (
     logger,
