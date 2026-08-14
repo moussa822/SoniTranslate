@@ -1,4 +1,3 @@
-
 import gradio as gr
 from soni_translate.logging_setup import (
     logger,
