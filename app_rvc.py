@@ -5,9 +5,12 @@ import huggingface_hub
 import huggingface_hub.file_download
 import torchaudio
 
-# 1. Neutralise l'attribut manquant 'set_audio_backend' de torchaudio pour Pyannote
+# Empêche le plantage si get_audio_backend() ou set_audio_backend() sont appelés par Pyannote
 if not hasattr(torchaudio, 'set_audio_backend'):
     torchaudio.set_audio_backend = lambda *args, **kwargs: None
+    
+if not hasattr(torchaudio, 'get_audio_backend'):
+    torchaudio.get_audio_backend = lambda: "soundfile"
 
 # 2. Convertit automatiquement 'use_auth_token' en 'token' pour HuggingFace Hub
 _original_hf_download = huggingface_hub.hf_hub_download
