@@ -1,9 +1,9 @@
 # Temporal requirements
 nest_asyncio
 --extra-index-url https://download.pytorch.org/whl/cu118
-torch>=2.1.0+cu118
-torchvision>=0.16.0+cu118
-torchaudio>=2.1.0+cu118
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
 yt-dlp
 gradio==4.19.2
 pydub==0.25.1
