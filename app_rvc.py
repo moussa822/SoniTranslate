@@ -1,31 +1,62 @@
 # ==============================================================================
-# MONKEY-PATCH GLOBAL : TORCH.LOAD, TORCHAUDIO (BACKEND MOCK) & HUGGINGFACE HUB
+# MONKEY-PATCH GLOBAL : TORCH.LOAD FORCÉ, TORCHAUDIO & HUGGINGFACE HUB
 # ==============================================================================
 import sys
 import types
 from collections import namedtuple
 import torch
+import torch.serialization
 import torchaudio
-import huggingface_hub
-import huggingface_hub.file_download
 
-# 1. Correctif PyTorch : autorise le chargement des modèles Pyannote (OmegaConf)
-_original_torch_load = torch.load
-def patched_torch_load(*args, **kwargs):
-    if 'weights_only' not in kwargs:
-        kwargs['weights_only'] = False
-    return _original_torch_load(*args, **kwargs)
-torch.load = patched_torch_load
+# 1. FORÇAGE TOTAL DE WEIGHTS_ONLY=FALSE (Écrase toute tentative de blocage)
+_orig_torch_load = torch.load
+def _force_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
 
-# 2. Création du faux module 'torchaudio.backend.common' pour tromper Pyannote
+_orig_ser_load = torch.serialization.load
+def _force_ser_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _orig_ser_load(*args, **kwargs)
+
+torch.load = _force_load
+torch.serialization.load = _force_ser_load
+
+# 2. Déblocage d'OmegaConf dans la liste blanche PyTorch
+try:
+    import omegaconf.listconfig
+    import omegaconf.dictconfig
+    import omegaconf.base
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        torch.serialization.add_safe_globals([
+            omegaconf.listconfig.ListConfig,
+            omegaconf.dictconfig.DictConfig,
+            omegaconf.base.Container,
+            omegaconf.base.Node,
+            omegaconf.base.ContainerMetadata
+        ])
+except Exception:
+    pass
+
+# 3. Patch direct de Lightning Fabric (utilisé par Pyannote)
+try:
+    import lightning_fabric.utilities.cloud_io
+    _orig_pl_load = lightning_fabric.utilities.cloud_io._load
+    def _force_pl_load(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return _orig_pl_load(*args, **kwargs)
+    lightning_fabric.utilities.cloud_io._load = _force_pl_load
+    lightning_fabric.utilities.cloud_io.pl_load = _force_pl_load
+except Exception:
+    pass
+
+# 4. Faux module 'torchaudio.backend.common' pour tromper Pyannote
 if not hasattr(torchaudio, 'backend'):
     backend_mod = types.ModuleType('torchaudio.backend')
     backend_common_mod = types.ModuleType('torchaudio.backend.common')
-    
     AudioMetaData = namedtuple('AudioMetaData', ['sample_rate', 'num_frames', 'num_channels', 'bits_per_sample', 'encoding'], defaults=(0, 0, 0, 0, ""))
     backend_common_mod.AudioMetaData = AudioMetaData
     backend_mod.common = backend_common_mod
-    
     torchaudio.backend = backend_mod
     sys.modules['torchaudio.backend'] = backend_mod
     sys.modules['torchaudio.backend.common'] = backend_common_mod
@@ -36,7 +67,10 @@ if not hasattr(torchaudio, 'set_audio_backend'):
 if not hasattr(torchaudio, 'get_audio_backend'):
     torchaudio.get_audio_backend = lambda: "soundfile"
 
-# 3. Correctif HuggingFace use_auth_token -> token
+# 5. Correctif HuggingFace use_auth_token -> token
+import huggingface_hub
+import huggingface_hub.file_download
+
 _original_hf_download = huggingface_hub.hf_hub_download
 def robust_hf_download(*args, **kwargs):
     if 'use_auth_token' in kwargs:
