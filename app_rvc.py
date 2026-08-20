@@ -1,34 +1,29 @@
 # ==============================================================================
-# MONKEY-PATCH GLOBAL : TORCHAUDIO (BACKEND MOCK) & HUGGINGFACE HUB
+# MONKEY-PATCH GLOBAL : TORCH.LOAD, TORCHAUDIO ET HUGGINGFACE HUB
 # ==============================================================================
 import sys
 import types
 from collections import namedtuple
+import torch
 import torchaudio
 import huggingface_hub
 import huggingface_hub.file_download
 
-# 1. Création d'un faux module 'torchaudio.backend.common' pour tromper Pyannote
-if not hasattr(torchaudio, 'backend'):
-    backend_mod = types.ModuleType('torchaudio.backend')
-    backend_common_mod = types.ModuleType('torchaudio.backend.common')
-    
-    # Structure AudioMetaData attendue par Pyannote
-    AudioMetaData = namedtuple('AudioMetaData', ['sample_rate', 'num_frames', 'num_channels', 'bits_per_sample', 'encoding'], defaults=(0, 0, 0, 0, ""))
-    backend_common_mod.AudioMetaData = AudioMetaData
-    backend_mod.common = backend_common_mod
-    
-    torchaudio.backend = backend_mod
-    sys.modules['torchaudio.backend'] = backend_mod
-    sys.modules['torchaudio.backend.common'] = backend_common_mod
+# 1. Correctif PyTorch pour autoriser les vieux formats de poids (OmegaConf / Pyannote)
+_original_torch_load = torch.load
+def patched_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = patched_torch_load
 
+# 2. Correctif Pyannote / WhisperX pour Torchaudio
 if not hasattr(torchaudio, 'set_audio_backend'):
     torchaudio.set_audio_backend = lambda *args, **kwargs: None
-
 if not hasattr(torchaudio, 'get_audio_backend'):
     torchaudio.get_audio_backend = lambda: "soundfile"
 
-# 2. Correctif HuggingFace use_auth_token
+# 3. Correctif HuggingFace use_auth_token
 _original_hf_download = huggingface_hub.hf_hub_download
 def robust_hf_download(*args, **kwargs):
     if 'use_auth_token' in kwargs:
