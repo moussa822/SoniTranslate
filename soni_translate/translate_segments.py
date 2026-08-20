@@ -5,6 +5,7 @@ import copy
 from .language_configuration import fix_code_language, INVERTED_LANGUAGES
 from .logging_setup import logger
 import re
+import json
 import time
 import os
 
@@ -48,22 +49,36 @@ DOCS_TRANSLATION_PROCESS_OPTIONS = [
 ]
 
 # ==============================================================================
-# PROMPT FINAL - Conversation naturelle
+# PROMPT CONTEXTUEL
 # ==============================================================================
 CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage français pour vidéos YouTube "Gold Digger Prank".
 
 RÈGLES OBLIGATOIRES :
-1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que l'anglais original.
-2. STYLE : Français naturel de jeunes (22-28 ans) en conversation réelle.
+1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que l'original.
+2. STYLE : Français naturel de jeunes (20-28 ans) en conversation réelle.
    - Tutoiement fluide.
-   - Langage courant : mec, frère, vas-y, sérieux ?, c'est ouf, grave, etc. (seulement quand ça sonne vrai).
-3. ADAPTATION : Transforme le slang américain en français courant et naturel.
-4. CONTEXTE : Tiens compte des lignes précédentes pour que la conversation coule naturellement.
-
-Réponds UNIQUEMENT avec les traductions, une par ligne, sans numéros, sans explications."""
+   - Langage courant : mec, frère, vas-y, sérieux ?, c'est ouf, grave, etc. (quand ça sonne naturel).
+3. ADAPTATION : Transforme le slang/argot en français courant et percutant.
+4. FORMAT : Renvoie STRICTEMENT un tableau JSON de chaînes de caractères contenant les traductions dans le même ordre exact.
+Exemple de format de réponse attendu :
+["Traduction ligne 1", "Traduction ligne 2", "Traduction ligne 3"]"""
 
 # ==============================================================================
-# FONCTION BATCH + CONTEXTE GLOBAL (fix NameError)
+# FILTRE DE SÉCURITÉ ANTI-PAGE D'ERREUR
+# ==============================================================================
+def is_corrupted_translation(text):
+    """Détecte si un traducteur a renvoyé une page d'erreur HTTP au lieu d'une vraie traduction."""
+    if not text or not isinstance(text, str):
+        return True
+    bad_patterns = [
+        "error 500", "server error", "that’s an error", "that's an error",
+        "please try again later", "that's all we know", "html", "<body", "500."
+    ]
+    text_lower = text.lower()
+    return any(p in text_lower for p in bad_patterns)
+
+# ==============================================================================
+# FONCTION BATCH + CONTEXTE AVEC RETRY ET SÉCURITÉ
 # ==============================================================================
 def _batch_with_context(segments, batch_size, translate_func, desc, target_lang):
     translated = copy.deepcopy(segments)
@@ -78,26 +93,49 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
         previous = "\n".join([f"Précédent {i+1}: {c}" for i, c in enumerate(context[-3:])])
         lines_text = "\n".join([f"{i+1}. {seg['text'].strip()}" for i, seg in enumerate(batch)])
 
-        full_prompt = f"{CONTEXT_GOLD_DIGGER_PROMPT}\n\nContexte précédent :\n{previous}\n\nTraduis maintenant ces lignes :\n{lines_text}"
+        full_prompt = (
+            f"Contexte précédent :\n{previous}\n\n"
+            f"Lignes à traduire ({batch_len} éléments) :\n{lines_text}\n\n"
+            f"Renvoie UNIQUEMENT le tableau JSON de {batch_len} éléments :"
+        )
 
-        translated_lines = translate_func(full_prompt, batch_len)
+        translated_lines = None
+        # Boucle de réessai automatique (jusqu'à 3 tentatives avec pause)
+        for attempt in range(3):
+            try:
+                translated_lines = translate_func(full_prompt, batch_len)
+                if translated_lines and len(translated_lines) == batch_len:
+                    # Vérification qu'aucune ligne ne contient d'erreur serveur
+                    if not any(is_corrupted_translation(line) for line in translated_lines):
+                        break
+            except Exception as e:
+                logger.warning(f"Translation attempt {attempt+1} failed: {e}")
+            time.sleep(1.5 * (attempt + 1))
 
         if translated_lines and len(translated_lines) == batch_len:
             for j, trans in enumerate(translated_lines):
-                clean = re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', trans).strip()
+                clean = re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', str(trans)).strip()
+                # Nettoyage des guillemets superflus
+                clean = re.sub(r'^["\']|["\']$', '', clean).strip()
                 translated[start + j]["text"] = clean
             context.extend(translated_lines)
         else:
-            # FIX NAMEERROR : on utilise target_lang passé en paramètre
+            # Fallback sécurisé : Google Translator avec filtre anti-erreur
+            logger.warning(f"Batch from {start} to {end} fallback to Google Translate.")
             tr = GoogleTranslator(source='auto', target=fix_code_language(target_lang))
             for seg in batch:
+                orig_text = seg["text"].strip()
                 try:
-                    seg["text"] = tr.translate(seg["text"].strip())
-                except:
-                    pass
+                    res = tr.translate(orig_text)
+                    if res and not is_corrupted_translation(res):
+                        seg["text"] = res
+                    else:
+                        seg["text"] = orig_text
+                except Exception:
+                    seg["text"] = orig_text
 
         progress.update(batch_len)
-        time.sleep(1.8)
+        time.sleep(0.5)
 
     progress.close()
     return translated
@@ -106,30 +144,50 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
 # GEMINI - Batch + Contexte
 # ==============================================================================
 def gemini_translate(segments, target, source=None, mode="flash"):
-    api_key = "AIzaSyTaCléGeminiIciColleLaVraieCléComplète"
-    if not api_key or len(api_key) < 30:
-        logger.error("❌ GEMINI: Clé manquante !")
+    # Récupération automatique de la clé d'environnement Colab
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key") or ""
+    if not api_key or len(api_key) < 20:
+        logger.error("❌ GEMINI: Clé GOOGLE_API_KEY manquante dans l'environnement !")
         return translate_iterative(segments, target, source)
 
-    model_id = "gemini-3.1-pro-preview" if mode == "pro" else "gemini-flash-latest"
+    model_id = "gemini-2.5-pro-preview" if mode == "pro" else "gemini-2.5-flash"
     client = genai.Client(api_key=api_key)
-    config = types.GenerateContentConfig(temperature=0.25, max_output_tokens=1500, system_instruction=CONTEXT_GOLD_DIGGER_PROMPT)
+    config = types.GenerateContentConfig(
+        temperature=0.2,
+        max_output_tokens=2048,
+        system_instruction=CONTEXT_GOLD_DIGGER_PROMPT,
+        response_mime_type="application/json"
+    )
 
     def call_gemini(full_prompt, batch_len):
+        response = client.models.generate_content(model=model_id, contents=full_prompt, config=config)
+        raw_text = response.text.strip()
+        
+        # Extraction du tableau JSON
         try:
-            response = client.models.generate_content(model=model_id, contents=full_prompt, config=config)
-            lines = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
-            return lines[:batch_len]
-        except:
-            return None
+            data = json.loads(raw_text)
+            if isinstance(data, list):
+                return [str(x).strip() for x in data][:batch_len]
+            elif isinstance(data, dict):
+                # Si Gemini renvoie un dictionnaire avec une clé 'translations'
+                for v in data.values():
+                    if isinstance(v, list):
+                        return [str(x).strip() for x in v][:batch_len]
+        except Exception:
+            pass
 
-    return _batch_with_context(segments, 15, call_gemini, f"Translating (Gemini {mode.upper()} BATCH CONTEXT)", target)
+        # Fallback par parsing ligne par ligne si le JSON n'est pas strict
+        lines = [re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', l).strip() for l in raw_text.split('\n') if l.strip()]
+        lines = [l for l in lines if not l.startswith('[') and not l.startswith(']')]
+        return lines[:batch_len]
+
+    return _batch_with_context(segments, 20, call_gemini, f"Translating (Gemini {mode.upper()} Batch)", target)
 
 # ==============================================================================
 # GROQ - Batch + Contexte
 # ==============================================================================
 def groq_translate(segments, target, source=None):
-    api_key = "gsk_taCléGroqIciColleLaVraieClé"
+    api_key = os.getenv("GROQ_API_KEY") or os.getenv("groq_api_key") or ""
     if not api_key:
         logger.error("❌ GROQ: Clé manquante !")
         return translate_iterative(segments, target, source)
@@ -137,59 +195,68 @@ def groq_translate(segments, target, source=None):
     client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, http_client=httpx.Client(timeout=60))
 
     def call_groq(full_prompt, batch_len):
+        chat = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": CONTEXT_GOLD_DIGGER_PROMPT},
+                {"role": "user", "content": full_prompt}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        content = chat.choices[0].message.content.strip()
         try:
-            chat = client.chat.completions.create(
-                messages=[{"role": "system", "content": CONTEXT_GOLD_DIGGER_PROMPT},
-                          {"role": "user", "content": full_prompt}],
-                model="llama-3.3-70b-versatile",
-                temperature=0.3,
-            )
-            lines = [line.strip() for line in chat.choices[0].message.content.strip().split('\n') if line.strip()]
+            data = json.loads(content)
+            if isinstance(data, list):
+                return [str(x).strip() for x in data][:batch_len]
+            for v in data.values():
+                if isinstance(v, list):
+                    return [str(x).strip() for x in v][:batch_len]
+        except Exception:
+            lines = [l.strip() for l in content.split('\n') if l.strip()]
             return lines[:batch_len]
-        except:
-            return None
+        return None
 
-    return _batch_with_context(segments, 18, call_groq, "Translating (Groq BATCH CONTEXT)", target)
+    return _batch_with_context(segments, 20, call_groq, "Translating (Groq LLaMA-3 Batch)", target)
 
 # ==============================================================================
-# ZEPHYR - Batch + Contexte (ultra rapide)
+# ZEPHYR - Batch + Contexte
 # ==============================================================================
-def hf_zephyr_translate(segments, target, source=None, batch_size=18):
-    hf_token = "hf_taCléHuggingFaceIciColleLaVraieToken"
+def hf_zephyr_translate(segments, target, source=None, batch_size=15):
+    hf_token = os.getenv("HF_TOKEN") or os.getenv("YOUR_HF_TOKEN") or ""
     if not hf_token or not hf_token.startswith("hf_"):
-        logger.error("❌ ZEPHYR: Clé manquante !")
+        logger.error("❌ ZEPHYR: HF_TOKEN manquant !")
         return translate_iterative(segments, target, source)
 
     client = InferenceClient(model="HuggingFaceH4/zephyr-7b-beta", token=hf_token)
 
     def call_zephyr(full_prompt, batch_len):
-        try:
-            response = client.text_generation(full_prompt, max_new_tokens=1400, temperature=0.35, top_p=0.9, return_full_text=False)
-            lines = [line.strip() for line in response.strip().split('\n') if line.strip()]
-            return lines[:batch_len]
-        except:
-            return None
+        prompt = f"<|system|>\n{CONTEXT_GOLD_DIGGER_PROMPT}</s>\n<|user|>\n{full_prompt}</s>\n<|assistant|>"
+        response = client.text_generation(prompt, max_new_tokens=1500, temperature=0.3, return_full_text=False)
+        lines = [re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', l).strip() for l in response.strip().split('\n') if l.strip()]
+        return lines[:batch_len]
 
-    return _batch_with_context(segments, batch_size, call_zephyr, "Translating (Zephyr BATCH CONTEXT)", target)
+    return _batch_with_context(segments, batch_size, call_zephyr, "Translating (Zephyr Batch)", target)
 
 # ==============================================================================
-# Fonctions restantes (inchangées)
+# FONCTIONS STANDARDS ET FALLBACK
 # ==============================================================================
 def translate_iterative(segments, target, source=None):
     segments_ = copy.deepcopy(segments)
     if not source: source = "auto"
-    translator = GoogleTranslator(source=source, target=target)
-    for line in tqdm(range(len(segments_))):
+    target_clean = fix_code_language(target)
+    translator = GoogleTranslator(source=source, target=target_clean)
+    for line in tqdm(range(len(segments_)), desc="Translating (Iterative)"):
         text = segments_[line]["text"]
         try:
-            translated_line = translator.translate(text.strip())
-            segments_[line]["text"] = translated_line
+            res = translator.translate(text.strip())
+            if res and not is_corrupted_translation(res):
+                segments_[line]["text"] = res
         except Exception as e:
             logger.error(f"Error google iterative: {e}")
     return segments_
 
 def translate_batch(segments, target, chunk_size=2000, source=None):
-    # (code original complet - identique à avant)
     segments_copy = copy.deepcopy(segments)
     if not source: source = "auto"
     text_lines = [seg["text"].strip() for seg in segments_copy]
@@ -219,6 +286,8 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
     try:
         for text, text_iterable in zip(text_merge, global_text_list):
             translated_line = translator.translate(text.strip())
+            if is_corrupted_translation(translated_line):
+                raise ValueError("Corrupted Google Translate response")
             split_text = translated_line.split("|||||")
             if len(split_text) == len(text_iterable):
                 progress_bar.update(len(split_text))
@@ -226,6 +295,8 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
                 split_text = []
                 for txt_iter in text_iterable:
                     translated_txt = translator.translate(txt_iter.strip())
+                    if is_corrupted_translation(translated_txt):
+                        translated_txt = txt_iter
                     split_text.append(translated_txt)
                     progress_bar.update(1)
             split_list.append(split_text)
@@ -233,13 +304,16 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
     except Exception:
         progress_bar.close()
         return translate_iterative(segments, target, source)
+        
     translated_lines = list(chain.from_iterable(split_list))
     return verify_translate(segments, segments_copy, translated_lines, target, source)
 
 def verify_translate(segments, segments_copy, translated_lines, target, source):
     if len(segments) == len(translated_lines):
         for line in range(len(segments_copy)):
-            segments_copy[line]["text"] = translated_lines[line].replace("\t", "").replace("\n", "").strip()
+            clean_text = translated_lines[line].replace("\t", "").replace("\n", "").strip()
+            if not is_corrupted_translation(clean_text):
+                segments_copy[line]["text"] = clean_text
         return segments_copy
     else:
         return translate_iterative(segments, target, source)
