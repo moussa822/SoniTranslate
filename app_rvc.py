@@ -1,5 +1,5 @@
 # ==============================================================================
-# MONKEY-PATCH GLOBAL : TORCH.LOAD, TORCHAUDIO ET HUGGINGFACE HUB
+# MONKEY-PATCH GLOBAL : TORCH.LOAD, TORCHAUDIO (BACKEND MOCK) & HUGGINGFACE HUB
 # ==============================================================================
 import sys
 import types
@@ -9,7 +9,7 @@ import torchaudio
 import huggingface_hub
 import huggingface_hub.file_download
 
-# 1. Correctif PyTorch pour autoriser les vieux formats de poids (OmegaConf / Pyannote)
+# 1. Correctif PyTorch : autorise le chargement des modèles Pyannote (OmegaConf)
 _original_torch_load = torch.load
 def patched_torch_load(*args, **kwargs):
     if 'weights_only' not in kwargs:
@@ -17,13 +17,26 @@ def patched_torch_load(*args, **kwargs):
     return _original_torch_load(*args, **kwargs)
 torch.load = patched_torch_load
 
-# 2. Correctif Pyannote / WhisperX pour Torchaudio
+# 2. Création du faux module 'torchaudio.backend.common' pour tromper Pyannote
+if not hasattr(torchaudio, 'backend'):
+    backend_mod = types.ModuleType('torchaudio.backend')
+    backend_common_mod = types.ModuleType('torchaudio.backend.common')
+    
+    AudioMetaData = namedtuple('AudioMetaData', ['sample_rate', 'num_frames', 'num_channels', 'bits_per_sample', 'encoding'], defaults=(0, 0, 0, 0, ""))
+    backend_common_mod.AudioMetaData = AudioMetaData
+    backend_mod.common = backend_common_mod
+    
+    torchaudio.backend = backend_mod
+    sys.modules['torchaudio.backend'] = backend_mod
+    sys.modules['torchaudio.backend.common'] = backend_common_mod
+
 if not hasattr(torchaudio, 'set_audio_backend'):
     torchaudio.set_audio_backend = lambda *args, **kwargs: None
+
 if not hasattr(torchaudio, 'get_audio_backend'):
     torchaudio.get_audio_backend = lambda: "soundfile"
 
-# 3. Correctif HuggingFace use_auth_token
+# 3. Correctif HuggingFace use_auth_token -> token
 _original_hf_download = huggingface_hub.hf_hub_download
 def robust_hf_download(*args, **kwargs):
     if 'use_auth_token' in kwargs:
