@@ -1,351 +1,452 @@
-from tqdm import tqdm
-from deep_translator import GoogleTranslator
-from itertools import chain
-import copy
-from .language_configuration import fix_code_language, INVERTED_LANGUAGES
-from .logging_setup import logger
-import re
-import json
-import time
+from whisperx.alignment import (
+    DEFAULT_ALIGN_MODELS_TORCH as DAMT,
+    DEFAULT_ALIGN_MODELS_HF as DAMHF,
+)
+from whisperx.utils import TO_LANGUAGE_CODE
+import whisperx
+import torch
+import gc
 import os
+import soundfile as sf
+from IPython.utils import capture  # noqa
+from .language_configuration import EXTRA_ALIGN, INVERTED_LANGUAGES
+from .logging_setup import logger
+from .postprocessor import sanitize_file_name
+from .utils import remove_directory_contents, run_command
 
-# --- IMPORTS ---
+# --- CONFIGURATION ZERO GPU / COMPATIBILITÉ LOCALE ---
 try:
-    from google import genai
-    from google.genai import types
+    import spaces
 except ImportError:
-    pass
-try:
-    from openai import OpenAI
-except ImportError:
-    pass
-try:
-    from huggingface_hub import InferenceClient
-except ImportError:
-    pass
-try:
-    import httpx
-except ImportError:
-    pass
+    class spaces:
+        @staticmethod
+        def GPU(func):
+            return func
 
-TRANSLATION_PROCESS_OPTIONS = [
-    "gemini_flash",
-    "gemini_pro",
-    "groq_llama3",
-    "hf_zephyr_7b_beta",
-    "google_translator_batch",
-    "google_translator",
-    "gpt-3.5-turbo-0125",
-    "gpt-4-turbo-preview",
-    "disable_translation",
-]
+import copy
+import random
+import time
 
-DOCS_TRANSLATION_PROCESS_OPTIONS = [
-    "gemini_flash",
-    "gemini_pro",
-    "groq_llama3",
-    "hf_zephyr_7b_beta",
-    "google_translator",
-    "disable_translation",
-]
 
-# ==============================================================================
-# PROMPT CONTEXTUEL - Style Naturel YouTube
-# ==============================================================================
-CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage français pour vidéos YouTube.
+def random_sleep():
+    if os.environ.get("ZERO_GPU") == "TRUE":
+        sleep_time = round(random.uniform(7.2, 9.9), 1)
+        time.sleep(sleep_time)
 
-RÈGLES OBLIGATOIRES :
-1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que le texte original.
-2. STYLE : Français naturel, fluide et percutant de jeunes (20-28 ans).
-   - Tutoiement fluide et moderne.
-   - Langage parlé dynamique (ex: mec, vas-y, c'est ouf, grave, etc. quand ça sonne naturel).
-3. ADAPTATION : Traduis le sens et le ton des dialogues sans faire de traduction mot-à-mot robotique.
-4. FORMAT : Renvoie STRICTEMENT un tableau JSON de chaînes de caractères contenant les traductions dans le même ordre exact.
-Exemple attendu :
-["Traduction phrase 1", "Traduction phrase 2", "Traduction phrase 3"]"""
 
-# ==============================================================================
-# FILTRE ANTI-PAGE D'ERREUR SERVEUR
-# ==============================================================================
-def is_corrupted_translation(text):
-    """Détecte si un traducteur a renvoyé une page d'erreur HTTP au lieu d'une traduction."""
-    if not text or not isinstance(text, str):
-        return True
-    bad_patterns = [
-        "error 500", "server error", "that’s an error", "that's an error",
-        "please try again later", "that's all we know", "html", "<body", "500."
-    ]
-    text_lower = text.lower()
-    return any(p in text_lower for p in bad_patterns)
-
-# ==============================================================================
-# BATCHING CONTEXTUEL UNIFIÉ
-# ==============================================================================
-def _batch_with_context(segments, batch_size, translate_func, desc, target_lang):
-    translated = copy.deepcopy(segments)
-    progress = tqdm(total=len(segments), desc=desc)
-    context = []
-
-    for start in range(0, len(segments), batch_size):
-        end = min(start + batch_size, len(segments))
-        batch = translated[start:end]
-        batch_len = len(batch)
-
-        previous = "\n".join([f"Précédent {i+1}: {c}" for i, c in enumerate(context[-3:])])
-        lines_text = "\n".join([f"{i+1}. {seg['text'].strip()}" for i, seg in enumerate(batch)])
-
-        full_prompt = (
-            f"Contexte précédent :\n{previous}\n\n"
-            f"Lignes à traduire ({batch_len} phrases) :\n{lines_text}\n\n"
-            f"Renvoie UNIQUEMENT le tableau JSON de {batch_len} chaînes de caractères :"
-        )
-
-        translated_lines = None
-        # Boucle de réessai automatique (3 tentatives avec pause)
-        for attempt in range(3):
-            try:
-                translated_lines = translate_func(full_prompt, batch_len)
-                if translated_lines and len(translated_lines) == batch_len:
-                    if not any(is_corrupted_translation(line) for line in translated_lines):
-                        break
-            except Exception as e:
-                logger.warning(f"Tentative {attempt+1} échouée pour le batch {start}-{end}: {e}")
-            time.sleep(1.5 * (attempt + 1))
-
-        if translated_lines and len(translated_lines) == batch_len:
-            for j, trans in enumerate(translated_lines):
-                clean = re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', str(trans)).strip()
-                clean = re.sub(r'^["\']|["\']$', '', clean).strip()
-                translated[start + j]["text"] = clean
-            context.extend(translated_lines)
-        else:
-            # Fallback sécurisé : Google Translate avec filtre anti-erreur 500
-            logger.warning(f"Batch {start}-{end} basculé sur Google Translate de secours.")
-            tr = GoogleTranslator(source='auto', target=fix_code_language(target_lang))
-            for seg in batch:
-                orig_text = seg["text"].strip()
-                try:
-                    res = tr.translate(orig_text)
-                    if res and not is_corrupted_translation(res):
-                        seg["text"] = res
-                    else:
-                        seg["text"] = orig_text
-                except Exception:
-                    seg["text"] = orig_text
-
-        progress.update(batch_len)
-        time.sleep(0.5)
-
-    progress.close()
-    return translated
-
-# ==============================================================================
-# GEMINI (3.1 Pro & 2.0 Flash) - API Google GenAI
-# ==============================================================================
-def gemini_translate(segments, target, source=None, mode="flash"):
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key") or ""
-    if not api_key:
-        logger.error("❌ GEMINI: Clé GOOGLE_API_KEY manquante dans l'environnement !")
-        return translate_iterative(segments, target, source)
-
-    # Modèle 3.1 Pro pour le mode pro, et Flash 2.0/3.x pour le mode flash
-    model_id = "gemini-3.1-pro-preview" if mode == "pro" else "gemini-2.0-flash"
-    client = genai.Client(api_key=api_key)
-    config = types.GenerateContentConfig(
-        temperature=0.2,
-        max_output_tokens=2048,
-        system_instruction=CONTEXT_GOLD_DIGGER_PROMPT,
-        response_mime_type="application/json"
+@spaces.GPU
+def load_and_transcribe_audio(
+    asr_model,
+    audio,
+    compute_type,
+    language,
+    asr_options,
+    batch_size,
+    segment_duration_limit,
+):
+    # Load model
+    model = whisperx.load_model(
+        asr_model,
+        os.environ.get("SONITR_DEVICE") if os.environ.get("ZERO_GPU") != "TRUE" else "cuda",
+        compute_type=compute_type,
+        language=language,
+        asr_options=asr_options,
     )
 
-    def call_gemini(full_prompt, batch_len):
-        response = client.models.generate_content(model=model_id, contents=full_prompt, config=config)
-        raw_text = response.text.strip()
-        
-        try:
-            data = json.loads(raw_text)
-            if isinstance(data, list):
-                return [str(x).strip() for x in data][:batch_len]
-            elif isinstance(data, dict):
-                for v in data.values():
-                    if isinstance(v, list):
-                        return [str(x).strip() for x in v][:batch_len]
-        except Exception:
-            pass
+    # Transcribe audio
+    result = model.transcribe(
+        audio,
+        batch_size=batch_size,
+        chunk_size=segment_duration_limit,
+        print_progress=True,
+    )
 
-        lines = [re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', l).strip() for l in raw_text.split('\n') if l.strip()]
-        lines = [l for l in lines if not l.startswith('[') and not l.startswith(']')]
-        return lines[:batch_len]
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()  # noqa
 
-    return _batch_with_context(segments, 20, call_gemini, f"Translating (Gemini {mode.upper()} Batch)", target)
+    return result
 
-# ==============================================================================
-# GROQ (LLaMA-3.3 70B)
-# ==============================================================================
-def groq_translate(segments, target, source=None):
-    api_key = os.getenv("GROQ_API_KEY") or os.getenv("groq_api_key") or ""
-    if not api_key:
-        logger.error("❌ GROQ: Clé GROQ_API_KEY manquante !")
-        return translate_iterative(segments, target, source)
 
-    client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, http_client=httpx.Client(timeout=60))
+def load_align_and_align_segments(result, audio, DAMHF):
+    # Load alignment model
+    model_a, metadata = whisperx.load_align_model(
+        language_code=result["language"],
+        device=os.environ.get("SONITR_DEVICE") if os.environ.get("ZERO_GPU") != "TRUE" else "cpu",
+        model_name=None
+        if result["language"] in DAMHF.keys()
+        else EXTRA_ALIGN[result["language"]],
+    )
 
-    def call_groq(full_prompt, batch_len):
-        chat = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": CONTEXT_GOLD_DIGGER_PROMPT},
-                {"role": "user", "content": full_prompt}
-            ],
-            model="llama-3.3-70b-versatile",
-            temperature=0.2,
-            response_format={"type": "json_object"}
-        )
-        content = chat.choices[0].message.content.strip()
-        try:
-            data = json.loads(content)
-            if isinstance(data, list):
-                return [str(x).strip() for x in data][:batch_len]
-            for v in data.values():
-                if isinstance(v, list):
-                    return [str(x).strip() for x in v][:batch_len]
-        except Exception:
-            lines = [l.strip() for l in content.split('\n') if l.strip()]
-            return lines[:batch_len]
-        return None
+    # Align segments
+    alignment_result = whisperx.align(
+        result["segments"],
+        model_a,
+        metadata,
+        audio,
+        os.environ.get("SONITR_DEVICE") if os.environ.get("ZERO_GPU") != "TRUE" else "cpu",
+        return_char_alignments=True,
+        print_progress=False,
+    )
 
-    return _batch_with_context(segments, 20, call_groq, "Translating (Groq LLaMA-3.3 Batch)", target)
+    # Clean up
+    del model_a
+    gc.collect()
+    torch.cuda.empty_cache()  # noqa
 
-# ==============================================================================
-# ZEPHYR (Hugging Face Inference)
-# ==============================================================================
-def hf_zephyr_translate(segments, target, source=None, batch_size=15):
-    hf_token = os.getenv("HF_TOKEN") or os.getenv("YOUR_HF_TOKEN") or ""
-    if not hf_token or not hf_token.startswith("hf_"):
-        logger.error("❌ ZEPHYR: HF_TOKEN manquant !")
-        return translate_iterative(segments, target, source)
+    return alignment_result
 
-    client = InferenceClient(model="HuggingFaceH4/zephyr-7b-beta", token=hf_token)
 
-    def call_zephyr(full_prompt, batch_len):
-        prompt = f"<|system|>\n{CONTEXT_GOLD_DIGGER_PROMPT}</s>\n<|user|>\n{full_prompt}</s>\n<|assistant|>"
-        response = client.text_generation(prompt, max_new_tokens=1500, temperature=0.3, return_full_text=False)
-        lines = [re.sub(r'^\s*[\d]+[\.\)\-\s]+', '', l).strip() for l in response.strip().split('\n') if l.strip()]
-        return lines[:batch_len]
+@spaces.GPU
+def diarize_audio(diarize_model, audio_wav, min_speakers, max_speakers):
+    if os.environ.get("ZERO_GPU") == "TRUE":
+        diarize_model.model.to(torch.device("cuda"))
+    diarize_segments = diarize_model(
+        audio_wav,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+    )
+    return diarize_segments
 
-    return _batch_with_context(segments, batch_size, call_zephyr, "Translating (Zephyr Batch)", target)
 
-# ==============================================================================
-# GOOGLE TRANSLATE FALLBACK
-# ==============================================================================
-def translate_iterative(segments, target, source=None):
-    segments_ = copy.deepcopy(segments)
-    if not source: source = "auto"
-    target_clean = fix_code_language(target)
-    translator = GoogleTranslator(source=source, target=target_clean)
-    for line in tqdm(range(len(segments_)), desc="Translating (Iterative)"):
-        text = segments_[line]["text"]
-        try:
-            res = translator.translate(text.strip())
-            if res and not is_corrupted_translation(res):
-                segments_[line]["text"] = res
-        except Exception as e:
-            logger.error(f"Error google iterative: {e}")
-    return segments_
+ASR_MODEL_OPTIONS = [
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "distil-large-v2",
+    "Systran/faster-distil-whisper-large-v3",
+    "tiny.en",
+    "base.en",
+    "small.en",
+    "medium.en",
+    "distil-small.en",
+    "distil-medium.en",
+    "OpenAI_API_Whisper",
+]
 
-def translate_batch(segments, target, chunk_size=2000, source=None):
-    segments_copy = copy.deepcopy(segments)
-    if not source: source = "auto"
-    text_lines = [seg["text"].strip() for seg in segments_copy]
-    text_merge = []
-    actual_chunk = ""
-    global_text_list = []
-    actual_text_list = []
-    for one_line in text_lines:
-        one_line = " " if not one_line else one_line
-        if (len(actual_chunk) + len(one_line)) <= chunk_size:
-            if actual_chunk: actual_chunk += " ||||| "
-            actual_chunk += one_line
-            actual_text_list.append(one_line)
-        else:
-            text_merge.append(actual_chunk)
-            actual_chunk = one_line
-            global_text_list.append(actual_text_list)
-            actual_text_list = [one_line]
-    if actual_chunk:
-        text_merge.append(actual_chunk)
-        global_text_list.append(actual_text_list)
+COMPUTE_TYPE_GPU = [
+    "default",
+    "auto",
+    "int8",
+    "int8_float32",
+    "int8_float16",
+    "int8_bfloat16",
+    "float16",
+    "bfloat16",
+    "float32",
+]
 
-    progress_bar = tqdm(total=len(segments), desc="Translating (Google Batch)")
-    translator = GoogleTranslator(source=source, target=target)
-    split_list = []
-   
-    try:
-        for text, text_iterable in zip(text_merge, global_text_list):
-            translated_line = translator.translate(text.strip())
-            if is_corrupted_translation(translated_line):
-                raise ValueError("Page d'erreur détectée dans Google Translate")
-            split_text = translated_line.split("|||||")
-            if len(split_text) == len(text_iterable):
-                progress_bar.update(len(split_text))
-            else:
-                split_text = []
-                for txt_iter in text_iterable:
-                    translated_txt = translator.translate(txt_iter.strip())
-                    if is_corrupted_translation(translated_txt):
-                        translated_txt = txt_iter
-                    split_text.append(translated_txt)
-                    progress_bar.update(1)
-            split_list.append(split_text)
-        progress_bar.close()
-    except Exception:
-        progress_bar.close()
-        return translate_iterative(segments, target, source)
-        
-    translated_lines = list(chain.from_iterable(split_list))
-    return verify_translate(segments, segments_copy, translated_lines, target, source)
+COMPUTE_TYPE_CPU = [
+    "default",
+    "auto",
+    "int8",
+    "int8_float32",
+    "int16",
+    "float32",
+]
 
-def verify_translate(segments, segments_copy, translated_lines, target, source):
-    if len(segments) == len(translated_lines):
-        for line in range(len(segments_copy)):
-            clean_text = translated_lines[line].replace("\t", "").replace("\n", "").strip()
-            if not is_corrupted_translation(clean_text):
-                segments_copy[line]["text"] = clean_text
-        return segments_copy
-    else:
-        return translate_iterative(segments, target, source)
+WHISPER_MODELS_PATH = "./WHISPER_MODELS"
 
-def gpt_sequential(segments, model, target, source=None):
-    return translate_iterative(segments, target, source)
 
-def gpt_batch(segments, model, target, token_batch_limit=900, source=None):
-    return translate_iterative(segments, target, source)
-
-def translate_text(
-    segments,
-    target,
-    translation_process="gemini_flash",
-    chunk_size=4500,
-    source=None,
-    token_batch_limit=1000,
+def openai_api_whisper(
+    input_audio_file,
+    source_lang=None,
+    chunk_duration=1800,
 ):
-    target_clean = fix_code_language(target)
-    source_clean = fix_code_language(source) if source else "auto"
-    match translation_process:
-        case "gemini_flash":
-            return gemini_translate(segments, target, source, mode="flash")
-        case "gemini_pro":
-            return gemini_translate(segments, target, source, mode="pro")
-        case "groq_llama3":
-            return groq_translate(segments, target, source)
-        case "hf_zephyr_7b_beta":
-            return hf_zephyr_translate(segments, target, source)
-        case "google_translator_batch":
-            return translate_batch(segments, target_clean, chunk_size, source_clean)
-        case "google_translator":
-            return translate_iterative(segments, target_clean, source_clean)
-        case model if "gpt" in model:
-            return translate_iterative(segments, target_clean, source_clean)
-        case "disable_translation":
-            return segments
-        case _:
-            return translate_iterative(segments, target_clean, source_clean)
+    info = sf.info(input_audio_file)
+    duration = info.duration
+
+    output_directory = "./whisper_api_audio_parts"
+    os.makedirs(output_directory, exist_ok=True)
+    remove_directory_contents(output_directory)
+
+    if duration > chunk_duration:
+        cm = f'ffmpeg -i "{input_audio_file}" -f segment -segment_time {chunk_duration} -c:a libvorbis "{output_directory}/output%03d.ogg"'
+        run_command(cm)
+        chunk_files = sorted(
+            [f"{output_directory}/{f}" for f in os.listdir(output_directory) if f.endswith(".ogg")]
+        )
+    else:
+        one_file = f"{output_directory}/output000.ogg"
+        cm = f'ffmpeg -i "{input_audio_file}" -c:a libvorbis {one_file}'
+        run_command(cm)
+        chunk_files = [one_file]
+
+    segments = []
+    language = source_lang if source_lang else None
+    for i, chunk in enumerate(chunk_files):
+        from openai import OpenAI
+
+        client = OpenAI()
+
+        audio_file = open(chunk, "rb")
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            language=language,
+            response_format="verbose_json",
+            timestamp_granularities=["segment"],
+        )
+
+        try:
+            transcript_dict = transcription.model_dump()
+        except Exception:
+            transcript_dict = transcription.to_dict()
+
+        if language is None:
+            logger.info(f'Language detected: {transcript_dict["language"]}')
+            language = TO_LANGUAGE_CODE[transcript_dict["language"]]
+
+        chunk_time = chunk_duration * (i)
+
+        for seg in transcript_dict["segments"]:
+            if "start" in seg.keys():
+                segments.append(
+                    {
+                        "text": seg["text"],
+                        "start": seg["start"] + chunk_time,
+                        "end": seg["end"] + chunk_time,
+                    }
+                )
+
+    audio = whisperx.load_audio(input_audio_file)
+    result = {"segments": segments, "language": language}
+
+    return audio, result
+
+
+def find_whisper_models():
+    path = WHISPER_MODELS_PATH
+    folders = []
+
+    if os.path.exists(path):
+        for folder in os.listdir(path):
+            folder_path = os.path.join(path, folder)
+            if os.path.isdir(folder_path) and "model.bin" in os.listdir(folder_path):
+                folders.append(folder)
+    return folders
+
+
+def get_guidance_prompt(language_code):
+    """
+    Génère un prompt de guidage (initial_prompt) natif pour forcer Whisper
+    à transcrire fidèlement dans la langue originale sans jamais dériver vers l'anglais.
+    """
+    if not language_code:
+        return "Transcribe the spoken audio faithfully in its original language. Do not translate to English."
+
+    lang = str(language_code).lower().strip()
+
+    if "zh" in lang or "chinese" in lang:
+        return "以下是中文对话，请保持原语言忠实转录，包含标点符号，绝对不要翻译成英语。"
+    elif "fr" in lang or "french" in lang:
+        return "Voici une transcription fidèle, complète et précise de dialogues parlés en français, avec ponctuation, sans traduction en anglais."
+    elif "es" in lang or "spanish" in lang:
+        return "Aquí hay una transcripción fiel y precisa de diálogos en español, con puntuación, sin traducción al inglés."
+    elif "ja" in lang or "japanese" in lang:
+        return "以下は日本語の会話です。句読点を含め、英語に翻訳せず日本語のまま書き起こしてください。"
+    elif "de" in lang or "german" in lang:
+        return "Hier ist eine getreue und genaue Abschrift von Dialogen auf Deutsch, ohne Übersetzung ins Englische."
+    elif "it" in lang or "italian" in lang:
+        return "Ecco una trascrizione fedele e accurata dei dialoghi in italiano, senza traduzione in inglese."
+    elif "en" in lang or "english" in lang:
+        return "Here is a faithful and accurate transcription of spoken English with clear punctuation."
+    elif lang not in ["auto", "automatic detection", "none", ""]:
+        return f"Please faithfully transcribe the speech in {language_code}. Keep the original language and do not translate to English."
+
+    return "Transcribe the spoken audio faithfully in its original language. Do not translate to English."
+
+
+def transcribe_speech(
+    audio_wav,
+    asr_model,
+    compute_type,
+    batch_size,
+    SOURCE_LANGUAGE,
+    literalize_numbers=True,
+    segment_duration_limit=15,
+):
+    """
+    Transcribe speech using a whisper model.
+    """
+    if asr_model == "OpenAI_API_Whisper":
+        if literalize_numbers:
+            logger.info("OpenAI's API Whisper does not support the literalization of numbers.")
+        return openai_api_whisper(audio_wav, SOURCE_LANGUAGE)
+
+    # 1. Génération du prompt de guidage multilingue anti-hallucination
+    guidance_prompt = get_guidance_prompt(SOURCE_LANGUAGE)
+    logger.info(f"Whisper Guidance Prompt activated: '{guidance_prompt[:60]}...'")
+
+    # 2. Nettoyage du code de langue
+    clean_language = SOURCE_LANGUAGE
+    if clean_language == "zh-TW":
+        clean_language = "zh"
+    elif str(clean_language).lower() in ["auto", "automatic detection", "none", ""]:
+        clean_language = None
+
+    asr_options = {
+        "initial_prompt": guidance_prompt,
+        "suppress_numerals": literalize_numbers,
+    }
+
+    if asr_model not in ASR_MODEL_OPTIONS:
+        base_dir = WHISPER_MODELS_PATH
+        if not os.path.exists(base_dir):
+            os.makedirs(base_dir)
+        model_dir = os.path.join(base_dir, sanitize_file_name(asr_model))
+
+        if not os.path.exists(model_dir):
+            from ctranslate2.converters import TransformersConverter
+
+            quantization = "float32"
+            try:
+                converter = TransformersConverter(
+                    asr_model,
+                    low_cpu_mem_usage=True,
+                    copy_files=["tokenizer_config.json", "preprocessor_config.json"],
+                )
+                converter.convert(model_dir, quantization=quantization, force=False)
+            except Exception as error:
+                if "File tokenizer_config.json does not exist" in str(error):
+                    converter._copy_files = ["tokenizer.json", "preprocessor_config.json"]
+                    converter.convert(model_dir, quantization=quantization, force=True)
+                else:
+                    raise error
+
+        asr_model = model_dir
+        logger.info(f"ASR Model: {str(model_dir)}")
+
+    audio = whisperx.load_audio(audio_wav)
+
+    result = load_and_transcribe_audio(
+        asr_model,
+        audio,
+        compute_type,
+        clean_language,
+        asr_options,
+        batch_size,
+        segment_duration_limit,
+    )
+
+    if result["language"] == "zh" and not guidance_prompt:
+        result["language"] = "zh-TW"
+        logger.info("Chinese - Traditional (zh-TW)")
+
+    return audio, result
+
+
+def align_speech(audio, result):
+    DAMHF.update(DAMT)  # lang align
+    if (
+        result["language"] not in DAMHF.keys()
+        and result["language"] not in EXTRA_ALIGN.keys()
+    ):
+        logger.warning("Automatic detection: Source language not compatible with align")
+        raise ValueError(
+            f"Detected language {result['language']} incompatible, you can select the source language to avoid this error."
+        )
+
+    if (
+        result["language"] in EXTRA_ALIGN.keys()
+        and EXTRA_ALIGN[result["language"]] == ""
+    ):
+        lang_name = (
+            INVERTED_LANGUAGES[result["language"]]
+            if result["language"] in INVERTED_LANGUAGES.keys()
+            else result["language"]
+        )
+        logger.warning(
+            f"No compatible wav2vec2 model found for the language '{lang_name}', skipping alignment."
+        )
+        return result
+
+    result = load_align_and_align_segments(result, audio, DAMHF)
+    return result
+
+
+diarization_models = {
+    "pyannote_3.1": "pyannote/speaker-diarization-3.1",
+    "pyannote_2.1": "pyannote/speaker-diarization@2.1",
+    "disable": "",
+}
+
+
+def reencode_speakers(result):
+    if not result.get("segments") or result["segments"][0].get("speaker") == "SPEAKER_00":
+        return result
+
+    speaker_mapping = {}
+    counter = 0
+
+    logger.debug("Reencode speakers")
+
+    for segment in result["segments"]:
+        old_speaker = segment.get("speaker", "SPEAKER_00")
+        if old_speaker not in speaker_mapping:
+            speaker_mapping[old_speaker] = f"SPEAKER_{counter:02d}"
+            counter += 1
+        segment["speaker"] = speaker_mapping[old_speaker]
+
+    return result
+
+
+def diarize_speech(
+    audio_wav,
+    result,
+    min_speakers,
+    max_speakers,
+    YOUR_HF_TOKEN,
+    model_name="pyannote/speaker-diarization@2.1",
+):
+    if max(min_speakers, max_speakers) > 1 and model_name:
+        try:
+            diarize_model = whisperx.DiarizationPipeline(
+                model_name=model_name,
+                use_auth_token=YOUR_HF_TOKEN,
+                device=os.environ.get("SONITR_DEVICE"),
+            )
+        except Exception as error:
+            error_str = str(error)
+            gc.collect()
+            torch.cuda.empty_cache()  # noqa
+            if "'NoneType' object has no attribute 'to'" in error_str:
+                if model_name == diarization_models["pyannote_2.1"]:
+                    raise ValueError(
+                        "Accept the license agreement for using Pyannote 2.1. You need to have an account on Hugging Face and accept the license to use the models: https://huggingface.co/pyannote/speaker-diarization and https://huggingface.co/pyannote/segmentation. Get your KEY TOKEN here: https://hf.co/settings/tokens"
+                    )
+                elif model_name == diarization_models["pyannote_3.1"]:
+                    raise ValueError(
+                        "New Licence Pyannote 3.1: You need to have an account on Hugging Face and accept the license to use the models: https://huggingface.co/pyannote/speaker-diarization-3.1 and https://huggingface.co/pyannote/segmentation-3.0"
+                    )
+                else:
+                    raise error
+
+        random_sleep()
+        diarize_segments = diarize_audio(diarize_model, audio_wav, min_speakers, max_speakers)
+
+        result_diarize = whisperx.assign_word_speakers(diarize_segments, result)
+
+        for segment in result_diarize["segments"]:
+            if "speaker" not in segment:
+                segment["speaker"] = "SPEAKER_00"
+                logger.warning(
+                    f"No speaker detected in {segment['start']}. First TTS will be used for the segment text: {segment['text']}"
+                )
+
+        del diarize_model
+        gc.collect()
+        torch.cuda.empty_cache()  # noqa
+    else:
+        result_diarize = result
+        result_diarize["segments"] = [
+            {**item, "speaker": "SPEAKER_00"} for item in result_diarize["segments"]
+        ]
+
+    return reencode_speakers(result_diarize)
+
