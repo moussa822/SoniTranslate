@@ -161,7 +161,6 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
         )
 
         translated_lines = None
-        # Boucle de réessai intelligente (avec pause longue si quota 429 ou 503)
         for attempt in range(3):
             try:
                 translated_lines = translate_func(full_prompt, batch_len)
@@ -169,10 +168,9 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
                     break
             except Exception as e:
                 err_msg = str(e).lower()
-                # Si l'API sature ou dépasse le quota (429 / 503 / resource_exhausted)
                 if "429" in err_msg or "resource_exhausted" in err_msg or "503" in err_msg or "unavailable" in err_msg:
-                    sleep_time = 25.0 * (attempt + 1)
-                    logger.warning(f"Quota/Saturation API détecté au batch {start}-{end}. Pause de sécurité de {sleep_time}s pour recharger le quota...")
+                    sleep_time = 20.0 * (attempt + 1)
+                    logger.warning(f"Quota/Saturation API détecté au batch {start}-{end}. Pause de sécurité de {sleep_time}s...")
                     time.sleep(sleep_time)
                 else:
                     logger.warning(f"Tentative {attempt+1} échouée pour le batch {start}-{end}: {e}")
@@ -192,21 +190,19 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
                     translated[start + j]["text"] = _single_translate(batch[j]["text"], target_lang)
             context.extend(translated_lines[:batch_len])
         else:
-            # Si le LLM a totalement échoué après 3 essais prolongés
             logger.warning(f"Batch {start}-{end} basculé sur secours individuel.")
             for j, seg in enumerate(batch):
                 translated[start + j]["text"] = _single_translate(seg["text"], target_lang)
                 time.sleep(0.3)
 
         progress.update(batch_len)
-        # Pause de respiration entre chaque paquet pour rester sous les 15 requêtes/min de Google
-        time.sleep(2.5)
+        time.sleep(2.0)
 
     progress.close()
     return translated
 
 # ==============================================================================
-# GEMINI (Flash & Pro) - Optimisé 35 phrases par paquet
+# GEMINI (3.1 Pro & 2.5 Flash / 1.5 Flash - 1500 Req/jour)
 # ==============================================================================
 def gemini_translate(segments, target, source=None, mode="flash"):
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key") or ""
@@ -214,7 +210,13 @@ def gemini_translate(segments, target, source=None, mode="flash"):
         logger.error("❌ GEMINI: Clé GOOGLE_API_KEY manquante dans l'environnement !")
         return translate_iterative(segments, target, source)
 
-    model_id = "gemini-3.1-pro-preview" if mode == "pro" else "gemini-3.6-flash"
+    # Liste de modèles avec secours automatique (évite tout 404 ou 429)
+    model_candidates = (
+        ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-1.5-pro"]
+        if mode == "pro"
+        else ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-flash-lite"]
+    )
+
     client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
         temperature=0.2,
@@ -223,10 +225,21 @@ def gemini_translate(segments, target, source=None, mode="flash"):
     )
 
     def call_gemini(full_prompt, batch_len):
-        response = client.models.generate_content(model=model_id, contents=full_prompt, config=config)
-        return parse_llm_response(response.text, batch_len)
+        last_exception = None
+        for m_id in model_candidates:
+            try:
+                response = client.models.generate_content(model=m_id, contents=full_prompt, config=config)
+                res = parse_llm_response(response.text, batch_len)
+                if res:
+                    return res
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"Modèle {m_id} indisponible ({e}), passage au modèle suivant...")
+                continue
+        if last_exception:
+            raise last_exception
+        return None
 
-    # Paquets de 35 phrases : 500 segments = seulement 14 requêtes au total !
     return _batch_with_context(segments, 35, call_gemini, f"Translating (Gemini {mode.upper()} Batch)", target)
 
 # ==============================================================================
@@ -359,7 +372,7 @@ def gpt_batch(segments, model, target, token_batch_limit=900, source=None):
     return translate_iterative(segments, target, source)
 
 # ==============================================================================
-# DISPATCHER PRINCIPAL (IMPORTÉ PAR APP_RVC.PY)
+# DISPATCHER PRINCIPAL
 # ==============================================================================
 def translate_text(
     segments,
