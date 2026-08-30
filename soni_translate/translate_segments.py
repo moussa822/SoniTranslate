@@ -1,15 +1,25 @@
-from tqdm import tqdm
-from deep_translator import GoogleTranslator
-from itertools import chain
-import copy
-from .language_configuration import fix_code_language, INVERTED_LANGUAGES
-from .logging_setup import logger
+import os
 import re
 import json
 import time
-import os
+import copy
+from itertools import chain
 
-# --- IMPORTS ---
+# --- IMPORT PROGRESSION TQDM SÉCURISÉ ---
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, *args, **kwargs):
+        class DummyTqdm:
+            def update(self, *a, **k): pass
+            def close(self): pass
+        return DummyTqdm()
+
+from deep_translator import GoogleTranslator
+from .language_configuration import fix_code_language, INVERTED_LANGUAGES
+from .logging_setup import logger
+
+# --- IMPORTS OPTIONNELS ---
 try:
     from google import genai
     from google.genai import types
@@ -169,14 +179,13 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
             except Exception as e:
                 err_msg = str(e).lower()
                 if "429" in err_msg or "resource_exhausted" in err_msg or "503" in err_msg or "unavailable" in err_msg:
-                    sleep_time = 20.0 * (attempt + 1)
-                    logger.warning(f"Quota/Saturation API détecté au batch {start}-{end}. Pause de sécurité de {sleep_time}s...")
+                    sleep_time = 15.0 * (attempt + 1)
+                    logger.warning(f"Quota/Saturation API au batch {start}-{end}. Pause de {sleep_time}s...")
                     time.sleep(sleep_time)
                 else:
                     logger.warning(f"Tentative {attempt+1} échouée pour le batch {start}-{end}: {e}")
-                    time.sleep(2.0 * (attempt + 1))
+                    time.sleep(1.5 * (attempt + 1))
 
-        # Application intelligente des traductions
         if translated_lines and len(translated_lines) > 0:
             for j in range(batch_len):
                 if j < len(translated_lines):
@@ -193,31 +202,59 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
             logger.warning(f"Batch {start}-{end} basculé sur secours individuel.")
             for j, seg in enumerate(batch):
                 translated[start + j]["text"] = _single_translate(seg["text"], target_lang)
-                time.sleep(0.3)
+                time.sleep(0.2)
 
-        progress.update(batch_len)
-        time.sleep(2.0)
+        try:
+            progress.update(batch_len)
+        except Exception:
+            pass
+        time.sleep(1.2)
 
-    progress.close()
+    try:
+        progress.close()
+    except Exception:
+        pass
     return translated
 
 # ==============================================================================
-# GEMINI (3.1 Pro & 2.5 Flash / 1.5 Flash - 1500 Req/jour)
+# GEMINI (AUTO-DÉCOUVERTE DYNAMIQUE DU MEILLEUR MODÈLE)
 # ==============================================================================
+_DISCOVERED_GEMINI_MODELS = {}
+
+def get_best_gemini_model(client, mode="flash"):
+    """Découvre dynamiquement les modèles actifs sur l'API Google pour éviter toute erreur 404."""
+    global _DISCOVERED_GEMINI_MODELS
+    if mode in _DISCOVERED_GEMINI_MODELS:
+        return _DISCOVERED_GEMINI_MODELS[mode]
+
+    try:
+        available = [m.name.replace("models/", "") for m in client.models.list()]
+        logger.info(f"Modèles Gemini disponibles sur ton compte : {available[:6]}...")
+        
+        if mode == "pro":
+            candidates = [m for m in available if "pro" in m and "vision" not in m and "tts" not in m]
+            chosen = candidates[0] if candidates else "gemini-2.5-pro"
+        else:
+            candidates = [m for m in available if "flash" in m and "thinking" not in m and "tts" not in m]
+            chosen = candidates[0] if candidates else "gemini-2.5-flash"
+            
+        _DISCOVERED_GEMINI_MODELS[mode] = chosen
+        logger.info(f"Modèle Gemini {mode.upper()} sélectionné automatiquement : '{chosen}'")
+        return chosen
+    except Exception as e:
+        logger.warning(f"Auto-découverte Gemini échouée ({e}), utilisation du modèle par défaut.")
+        fallback = "gemini-2.5-pro" if mode == "pro" else "gemini-2.5-flash"
+        return fallback
+
 def gemini_translate(segments, target, source=None, mode="flash"):
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key") or ""
     if not api_key:
         logger.error("❌ GEMINI: Clé GOOGLE_API_KEY manquante dans l'environnement !")
         return translate_iterative(segments, target, source)
 
-    # Liste de modèles avec secours automatique (évite tout 404 ou 429)
-    model_candidates = (
-        ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-1.5-pro"]
-        if mode == "pro"
-        else ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-flash-lite"]
-    )
-
     client = genai.Client(api_key=api_key)
+    model_id = get_best_gemini_model(client, mode=mode)
+
     config = types.GenerateContentConfig(
         temperature=0.2,
         max_output_tokens=3000,
@@ -225,20 +262,8 @@ def gemini_translate(segments, target, source=None, mode="flash"):
     )
 
     def call_gemini(full_prompt, batch_len):
-        last_exception = None
-        for m_id in model_candidates:
-            try:
-                response = client.models.generate_content(model=m_id, contents=full_prompt, config=config)
-                res = parse_llm_response(response.text, batch_len)
-                if res:
-                    return res
-            except Exception as e:
-                last_exception = e
-                logger.warning(f"Modèle {m_id} indisponible ({e}), passage au modèle suivant...")
-                continue
-        if last_exception:
-            raise last_exception
-        return None
+        response = client.models.generate_content(model=model_id, contents=full_prompt, config=config)
+        return parse_llm_response(response.text, batch_len)
 
     return _batch_with_context(segments, 35, call_gemini, f"Translating (Gemini {mode.upper()} Batch)", target)
 
@@ -337,7 +362,8 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
                 raise ValueError("Page d'erreur détectée dans Google Translate")
             split_text = translated_line.split("|||||")
             if len(split_text) == len(text_iterable):
-                progress_bar.update(len(split_text))
+                try: progress_bar.update(len(split_text))
+                except: pass
             else:
                 split_text = []
                 for txt_iter in text_iterable:
@@ -345,11 +371,14 @@ def translate_batch(segments, target, chunk_size=2000, source=None):
                     if is_corrupted_translation(translated_txt):
                         translated_txt = txt_iter
                     split_text.append(translated_txt)
-                    progress_bar.update(1)
+                    try: progress_bar.update(1)
+                    except: pass
             split_list.append(split_text)
-        progress_bar.close()
+        try: progress_bar.close()
+        except: pass
     except Exception:
-        progress_bar.close()
+        try: progress_bar.close()
+        except: pass
         return translate_iterative(segments, target, source)
         
     translated_lines = list(chain.from_iterable(split_list))
