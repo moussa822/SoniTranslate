@@ -50,19 +50,17 @@ DOCS_TRANSLATION_PROCESS_OPTIONS = [
 ]
 
 # ==============================================================================
-# PROMPT CONTEXTUEL - Style Naturel YouTube
+# PROMPT CONTEXTUEL UNIVERSEL
 # ==============================================================================
-CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage français pour vidéos YouTube.
+CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage vidéo pour YouTube.
 
 RÈGLES OBLIGATOIRES :
-1. LONGUEUR : Le français doit être AUSSI COURT ou PLUS COURT que le texte original.
-2. STYLE : Français naturel, fluide et percutant de jeunes (20-28 ans).
-   - Tutoiement fluide et moderne.
-   - Langage parlé dynamique (ex: mec, vas-y, c'est ouf, grave, etc. quand ça sonne naturel).
-3. ADAPTATION : Traduis le sens et le ton des dialogues sans faire de traduction mot-à-mot robotique.
-4. FORMAT : Renvoie STRICTEMENT un tableau JSON de chaînes de caractères contenant les traductions dans le même ordre exact.
-Exemple attendu :
-["Traduction phrase 1", "Traduction phrase 2", "Traduction phrase 3"]"""
+1. Traduis chaque ligne fidèlement dans un français naturel, fluide et parlé (style 20-28 ans).
+2. Le texte français doit être court et percutant pour coller au rythme de la vidéo.
+3. Conserve impérativement le sens exact et le tutoiement si le contexte s'y prête.
+4. Renvoie la traduction sous forme d'un tableau JSON de chaînes de caractères.
+Exemple :
+["Traduction 1", "Traduction 2", "Traduction 3"]"""
 
 # ==============================================================================
 # FILTRE ANTI-PAGE D'ERREUR SERVEUR
@@ -140,7 +138,7 @@ def _single_translate(text, target_lang):
     return orig_text
 
 # ==============================================================================
-# BATCHING CONTEXTUEL SÉCURISÉ
+# BATCHING CONTEXTUEL SÉCURISÉ AVEC GESTION DU RATE-LIMIT
 # ==============================================================================
 def _batch_with_context(segments, batch_size, translate_func, desc, target_lang):
     translated = copy.deepcopy(segments)
@@ -163,15 +161,24 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
         )
 
         translated_lines = None
+        # Boucle de réessai intelligente (avec pause longue si quota 429 ou 503)
         for attempt in range(3):
             try:
                 translated_lines = translate_func(full_prompt, batch_len)
                 if translated_lines and len(translated_lines) >= batch_len:
                     break
             except Exception as e:
-                logger.warning(f"Tentative {attempt+1} échouée pour le batch {start}-{end}: {e}")
-            time.sleep(1.5 * (attempt + 1))
+                err_msg = str(e).lower()
+                # Si l'API sature ou dépasse le quota (429 / 503 / resource_exhausted)
+                if "429" in err_msg or "resource_exhausted" in err_msg or "503" in err_msg or "unavailable" in err_msg:
+                    sleep_time = 25.0 * (attempt + 1)
+                    logger.warning(f"Quota/Saturation API détecté au batch {start}-{end}. Pause de sécurité de {sleep_time}s pour recharger le quota...")
+                    time.sleep(sleep_time)
+                else:
+                    logger.warning(f"Tentative {attempt+1} échouée pour le batch {start}-{end}: {e}")
+                    time.sleep(2.0 * (attempt + 1))
 
+        # Application intelligente des traductions
         if translated_lines and len(translated_lines) > 0:
             for j in range(batch_len):
                 if j < len(translated_lines):
@@ -185,19 +192,21 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
                     translated[start + j]["text"] = _single_translate(batch[j]["text"], target_lang)
             context.extend(translated_lines[:batch_len])
         else:
+            # Si le LLM a totalement échoué après 3 essais prolongés
             logger.warning(f"Batch {start}-{end} basculé sur secours individuel.")
             for j, seg in enumerate(batch):
                 translated[start + j]["text"] = _single_translate(seg["text"], target_lang)
-                time.sleep(0.2)
+                time.sleep(0.3)
 
         progress.update(batch_len)
-        time.sleep(0.5)
+        # Pause de respiration entre chaque paquet pour rester sous les 15 requêtes/min de Google
+        time.sleep(2.5)
 
     progress.close()
     return translated
 
 # ==============================================================================
-# GEMINI (Flash & Pro)
+# GEMINI (Flash & Pro) - Optimisé 35 phrases par paquet
 # ==============================================================================
 def gemini_translate(segments, target, source=None, mode="flash"):
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("google_api_key") or ""
@@ -205,11 +214,11 @@ def gemini_translate(segments, target, source=None, mode="flash"):
         logger.error("❌ GEMINI: Clé GOOGLE_API_KEY manquante dans l'environnement !")
         return translate_iterative(segments, target, source)
 
-    model_id = "gemini-1.5-pro" if mode == "pro" else "gemini-2.0-flash"
+    model_id = "gemini-3.1-pro-preview" if mode == "pro" else "gemini-3.6-flash"
     client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
         temperature=0.2,
-        max_output_tokens=2048,
+        max_output_tokens=3000,
         response_mime_type="application/json"
     )
 
@@ -217,7 +226,8 @@ def gemini_translate(segments, target, source=None, mode="flash"):
         response = client.models.generate_content(model=model_id, contents=full_prompt, config=config)
         return parse_llm_response(response.text, batch_len)
 
-    return _batch_with_context(segments, 20, call_gemini, f"Translating (Gemini {mode.upper()} Batch)", target)
+    # Paquets de 35 phrases : 500 segments = seulement 14 requêtes au total !
+    return _batch_with_context(segments, 35, call_gemini, f"Translating (Gemini {mode.upper()} Batch)", target)
 
 # ==============================================================================
 # GROQ (LLaMA-3.3 70B)
@@ -242,7 +252,7 @@ def groq_translate(segments, target, source=None):
         )
         return parse_llm_response(chat.choices[0].message.content, batch_len)
 
-    return _batch_with_context(segments, 20, call_groq, "Translating (Groq LLaMA-3.3 Batch)", target)
+    return _batch_with_context(segments, 30, call_groq, "Translating (Groq LLaMA-3.3 Batch)", target)
 
 # ==============================================================================
 # ZEPHYR (Hugging Face Inference)
