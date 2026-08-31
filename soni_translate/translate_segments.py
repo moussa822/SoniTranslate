@@ -57,8 +57,9 @@ CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage vidéo po
 RÈGLES OBLIGATOIRES :
 1. Traduis chaque ligne fidèlement dans un français naturel, fluide et parlé (style 20-28 ans).
 2. Le texte français doit être court et percutant pour coller au rythme de la vidéo.
-3. Conserve impérativement le sens exact et le tutoiement si le contexte s'y prête.
-4. Renvoie la traduction sous forme d'un tableau JSON de chaînes de caractères.
+3. Conserve impérativement le sens exact, les disputes, les émotions et le tutoiement si le contexte s'y prête.
+4. Traduis TOUTES les phrases sans exception, y compris les répliques piquantes ou familières.
+5. Renvoie la traduction sous forme d'un tableau JSON de chaînes de caractères.
 Exemple :
 ["Traduction 1", "Traduction 2", "Traduction 3"]"""
 
@@ -124,23 +125,23 @@ def parse_llm_response(raw_text, expected_len):
     return lines if lines else None
 
 def _single_translate(text, target_lang):
-    """Traduction de secours sécurisée d'une phrase unique."""
+    """Traduction de secours sécurisée d'une phrase unique avec plusieurs essais."""
     orig_text = str(text).strip()
     if not orig_text:
         return ""
     target_clean = fix_code_language(target_lang)
-    for _ in range(2):
+    for _ in range(3):
         try:
             tr = GoogleTranslator(source='auto', target=target_clean)
             res = tr.translate(orig_text)
-            if res and not is_corrupted_translation(res):
+            if res and not is_corrupted_translation(res) and res.strip() != orig_text:
                 return res.strip()
         except Exception:
             time.sleep(1.0)
     return orig_text
 
 # ==============================================================================
-# BATCHING CONTEXTUEL SÉCURISÉ (ZERO-SKIP)
+# BATCHING CONTEXTUEL SÉCURISÉ AVEC GESTION DU RATE-LIMIT
 # ==============================================================================
 def _batch_with_context(segments, batch_size, translate_func, desc, target_lang):
     translated = copy.deepcopy(segments)
@@ -164,7 +165,6 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
         )
 
         translated_lines = None
-        # Exécution de la fonction avec bascule interne sur les modèles de secours
         try:
             translated_lines = translate_func(full_prompt, batch_len)
         except Exception as e:
@@ -187,8 +187,7 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
             start += batch_size
             time.sleep(1.0)
         else:
-            # Si tous les modèles de la cascade ont échoué sur ce paquet, secours individuel
-            logger.warning(f"Paquet {start}-{end} repris phrase par phrase en secours...")
+            logger.warning(f"Paquet {start}-{end} basculé sur secours individuel...")
             for j, seg in enumerate(batch):
                 translated[start + j]["text"] = _single_translate(seg["text"], target_lang)
                 time.sleep(0.3)
@@ -201,7 +200,22 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
     return translated
 
 # ==============================================================================
-# GEMINI (CASCADE DYNAMIQUE & MÉMORISATION DU MODÈLE ACTIF)
+# CONFIGURATION SÉCURITÉ GEMINI (DÉBLOCAGE DE LA CENSURE DE DIALOGUES)
+# ==============================================================================
+def get_gemini_safety_settings():
+    """Désactive le blocage des insultes de fiction/dialogues pour ne jamais censurer de phrases."""
+    try:
+        return [
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+        ]
+    except Exception:
+        return None
+
+# ==============================================================================
+# GEMINI (CASCADE DYNAMIQUE & MÉMORISATION SANS CENSURE)
 # ==============================================================================
 _ACTIVE_GEMINI_INDEX = 0
 
@@ -214,23 +228,28 @@ def gemini_translate(segments, target, source=None, mode="flash"):
 
     client = genai.Client(api_key=api_key)
 
-    # Modèles actifs avec quotas indépendants
+    # Modèles actifs de secours
     if mode == "pro":
         candidates = ["gemini-3.1-pro-preview", "gemini-3.1-pro"]
     else:
         candidates = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.7-flash"]
 
-    config = types.GenerateContentConfig(
-        temperature=0.2,
-        max_output_tokens=3000,
-        response_mime_type="application/json"
-    )
+    config_kwargs = {
+        "temperature": 0.2,
+        "max_output_tokens": 3000,
+        "response_mime_type": "application/json"
+    }
+    
+    safety = get_gemini_safety_settings()
+    if safety:
+        config_kwargs["safety_settings"] = safety
+
+    config = types.GenerateContentConfig(**config_kwargs)
 
     def call_gemini(full_prompt, batch_len):
         global _ACTIVE_GEMINI_INDEX
         last_err = None
 
-        # On commence directement sur le dernier modèle qui a fonctionné
         num_models = len(candidates)
         for offset in range(num_models):
             idx = (_ACTIVE_GEMINI_INDEX + offset) % num_models
@@ -239,19 +258,18 @@ def gemini_translate(segments, target, source=None, mode="flash"):
                 response = client.models.generate_content(model=m_id, contents=full_prompt, config=config)
                 res = parse_llm_response(response.text, batch_len)
                 if res and len(res) > 0:
-                    _ACTIVE_GEMINI_INDEX = idx  # On mémorise ce modèle comme le modèle actif
+                    _ACTIVE_GEMINI_INDEX = idx
                     return res
             except Exception as e:
                 last_err = e
-                err_str = str(e).lower()
-                logger.warning(f"Modèle '{m_id}' saturé/indisponible ({e}). Bascule immédiate sur le modèle suivant pour le même paquet...")
+                logger.warning(f"Modèle '{m_id}' saturé/indisponible ({e}). Bascule immédiate sur le modèle suivant...")
                 continue
 
         if last_err:
             raise last_err
         return None
 
-    return _batch_with_context(segments, 20, call_gemini, f"Translating (Gemini {mode.upper()} Zero-Skip)", target)
+    return _batch_with_context(segments, 20, call_gemini, f"Translating (Gemini {mode.upper()} Uncensored)", target)
 
 # ==============================================================================
 # GROQ (LLaMA-3.3 70B)
