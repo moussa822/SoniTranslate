@@ -1,14 +1,30 @@
 # ==============================================================================
-# MONKEY-PATCH GLOBAL : TORCH.LOAD FORCÉ, TORCHAUDIO & HUGGINGFACE HUB
+# MONKEY-PATCH GLOBAL : CUDNN PRE-LOAD, TORCH.LOAD, TORCHAUDIO & HUGGINGFACE HUB
 # ==============================================================================
+import os
 import sys
 import types
+import ctypes
 from collections import namedtuple
 import torch
 import torch.serialization
 import torchaudio
 
-# 1. FORÇAGE TOTAL DE WEIGHTS_ONLY=FALSE (Écrase toute tentative de blocage)
+# 1. Pré-chargement automatique des bibliothèques cuDNN pour WhisperX / CTranslate2
+for lib_dir in [
+    "/content/SoniTranslate/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib",
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/local/cuda/lib64"
+]:
+    if os.path.exists(lib_dir):
+        for f in os.listdir(lib_dir):
+            if "libcudnn" in f and (f.endswith(".so.8") or f.endswith(".so.9") or f.endswith(".so")):
+                try:
+                    ctypes.CDLL(os.path.join(lib_dir, f))
+                except Exception:
+                    pass
+
+# 2. Correctif PyTorch : autorise le chargement des modèles Pyannote (OmegaConf)
 _orig_torch_load = torch.load
 def _force_load(*args, **kwargs):
     kwargs["weights_only"] = False
@@ -22,7 +38,7 @@ def _force_ser_load(*args, **kwargs):
 torch.load = _force_load
 torch.serialization.load = _force_ser_load
 
-# 2. Déblocage d'OmegaConf dans la liste blanche PyTorch
+# 3. Déblocage d'OmegaConf dans la liste blanche PyTorch
 try:
     import omegaconf.listconfig
     import omegaconf.dictconfig
@@ -38,7 +54,7 @@ try:
 except Exception:
     pass
 
-# 3. Patch direct de Lightning Fabric (utilisé par Pyannote)
+# 4. Patch direct de Lightning Fabric (utilisé par Pyannote)
 try:
     import lightning_fabric.utilities.cloud_io
     _orig_pl_load = lightning_fabric.utilities.cloud_io._load
@@ -50,7 +66,7 @@ try:
 except Exception:
     pass
 
-# 4. Faux module 'torchaudio.backend.common' pour tromper Pyannote
+# 5. Faux module 'torchaudio.backend.common' pour tromper Pyannote
 if not hasattr(torchaudio, 'backend'):
     backend_mod = types.ModuleType('torchaudio.backend')
     backend_common_mod = types.ModuleType('torchaudio.backend.common')
@@ -67,7 +83,7 @@ if not hasattr(torchaudio, 'set_audio_backend'):
 if not hasattr(torchaudio, 'get_audio_backend'):
     torchaudio.get_audio_backend = lambda: "soundfile"
 
-# 5. Correctif HuggingFace use_auth_token -> token
+# 6. Correctif HuggingFace use_auth_token -> token
 import huggingface_hub
 import huggingface_hub.file_download
 
