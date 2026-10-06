@@ -1,5 +1,5 @@
 # ==============================================================================
-# MONKEY-PATCH GLOBAL : CUDNN PRE-LOAD, TORCH.LOAD, TORCHAUDIO & HUGGINGFACE HUB
+# MONKEY-PATCH GLOBAL : CUBLAS 12, NATIVE CUDA CONV, TORCH.LOAD & HF HUB
 # ==============================================================================
 import os
 import sys
@@ -10,21 +10,20 @@ import torch
 import torch.serialization
 import torchaudio
 
-# 1. Pré-chargement automatique des bibliothèques cuDNN pour WhisperX / CTranslate2
-for lib_dir in [
-    "/content/SoniTranslate/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib",
-    "/usr/lib/x86_64-linux-gnu",
-    "/usr/local/cuda/lib64"
-]:
-    if os.path.exists(lib_dir):
-        for f in os.listdir(lib_dir):
-            if "libcudnn" in f and (f.endswith(".so.8") or f.endswith(".so.9") or f.endswith(".so")):
-                try:
-                    ctypes.CDLL(os.path.join(lib_dir, f))
-                except Exception:
-                    pass
+# 1. Évite le conflit cuDNN en forçant PyTorch à utiliser les cœurs CUDA natifs stables
+torch.backends.cudnn.enabled = False
 
-# 2. Correctif PyTorch : autorise le chargement des modèles Pyannote (OmegaConf)
+# 2. Pré-chargement ciblé uniquement sur cuBLAS 12 pour WhisperX / CTranslate2
+cublas_dir = "/content/SoniTranslate/.venv/lib/python3.10/site-packages/nvidia/cublas/lib"
+if os.path.exists(cublas_dir):
+    for f in os.listdir(cublas_dir):
+        if f.startswith("libcublas") and (".so" in f):
+            try:
+                ctypes.CDLL(os.path.join(cublas_dir, f), mode=ctypes.RTLD_GLOBAL)
+            except Exception:
+                pass
+
+# 3. Correctif PyTorch 2.6+ : autorise le chargement des modèles Pyannote (OmegaConf)
 _orig_torch_load = torch.load
 def _force_load(*args, **kwargs):
     kwargs["weights_only"] = False
@@ -38,7 +37,7 @@ def _force_ser_load(*args, **kwargs):
 torch.load = _force_load
 torch.serialization.load = _force_ser_load
 
-# 3. Déblocage d'OmegaConf dans la liste blanche PyTorch
+# 4. Déblocage d'OmegaConf dans la liste blanche PyTorch
 try:
     import omegaconf.listconfig
     import omegaconf.dictconfig
@@ -54,7 +53,7 @@ try:
 except Exception:
     pass
 
-# 4. Patch direct de Lightning Fabric (utilisé par Pyannote)
+# 5. Patch direct de Lightning Fabric (utilisé par Pyannote)
 try:
     import lightning_fabric.utilities.cloud_io
     _orig_pl_load = lightning_fabric.utilities.cloud_io._load
@@ -66,7 +65,7 @@ try:
 except Exception:
     pass
 
-# 5. Faux module 'torchaudio.backend.common' pour tromper Pyannote
+# 6. Faux module 'torchaudio.backend.common' pour tromper Pyannote
 if not hasattr(torchaudio, 'backend'):
     backend_mod = types.ModuleType('torchaudio.backend')
     backend_common_mod = types.ModuleType('torchaudio.backend.common')
@@ -83,7 +82,7 @@ if not hasattr(torchaudio, 'set_audio_backend'):
 if not hasattr(torchaudio, 'get_audio_backend'):
     torchaudio.get_audio_backend = lambda: "soundfile"
 
-# 6. Correctif HuggingFace use_auth_token -> token
+# 7. Correctif HuggingFace use_auth_token -> token
 import huggingface_hub
 import huggingface_hub.file_download
 
