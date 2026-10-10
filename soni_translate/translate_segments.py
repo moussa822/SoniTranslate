@@ -50,16 +50,19 @@ DOCS_TRANSLATION_PROCESS_OPTIONS = [
 ]
 
 # ==============================================================================
-# PROMPT CONTEXTUEL UNIVERSEL
+# PROMPT CONTEXTUEL DYNAMIQUE (MULTILINGUE)
 # ==============================================================================
-CONTEXT_GOLD_DIGGER_PROMPT = """Tu es un traducteur expert en doublage vidéo pour YouTube.
+def get_system_prompt(target_lang):
+    """Génère un prompt dynamique adapté à la langue cible choisie par l'utilisateur."""
+    return f"""Tu es un traducteur expert en doublage vidéo pour YouTube.
 
 RÈGLES OBLIGATOIRES :
-1. Traduis chaque ligne fidèlement dans un français naturel, fluide et parlé (style 20-28 ans).
-2. Le texte français doit être court et percutant pour coller au rythme de la vidéo.
-3. Conserve impérativement le sens exact, les disputes, les émotions et le tutoiement si le contexte s'y prête.
-4. Traduis TOUTES les phrases sans exception, y compris les répliques piquantes ou familières.
-5. Renvoie la traduction sous forme d'un tableau JSON de chaînes de caractères.
+1. Traduis chaque ligne fidèlement VERS LA LANGUE SUIVANTE : {target_lang}.
+2. Le style doit être naturel, fluide et parlé (adapté à un public jeune).
+3. Le texte en {target_lang} doit être court et percutant pour coller au rythme de la vidéo.
+4. Conserve impérativement le sens exact, les émotions et le niveau de langage (tutoiement/familier si applicable).
+5. Traduis TOUTES les phrases sans exception.
+6. Renvoie la traduction STRICTEMENT sous forme d'un tableau JSON de chaînes de caractères.
 Exemple :
 ["Traduction 1", "Traduction 2", "Traduction 3"]"""
 
@@ -147,6 +150,9 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
     translated = copy.deepcopy(segments)
     progress = tqdm(total=len(segments), desc=desc)
     context = []
+    
+    # On génère le prompt dynamique pour la langue cible
+    sys_prompt = get_system_prompt(target_lang)
 
     start = 0
     while start < len(segments):
@@ -158,19 +164,29 @@ def _batch_with_context(segments, batch_size, translate_func, desc, target_lang)
         lines_text = "\n".join([f"{i+1}. {seg['text'].strip()}" for i, seg in enumerate(batch)])
 
         full_prompt = (
-            f"{CONTEXT_GOLD_DIGGER_PROMPT}\n\n"
+            f"{sys_prompt}\n\n"
             f"Contexte précédent :\n{previous}\n\n"
             f"Lignes à traduire ({batch_len} phrases) :\n{lines_text}\n\n"
             f"Renvoie le tableau JSON des {batch_len} traductions :"
         )
 
         translated_lines = None
-        try:
-            translated_lines = translate_func(full_prompt, batch_len)
-        except Exception as e:
-            logger.warning(f"Échec de traduction sur le paquet {start}-{end}: {e}")
+        for attempt in range(3):
+            try:
+                translated_lines = translate_func(full_prompt, batch_len)
+                if translated_lines and len(translated_lines) >= batch_len:
+                    break
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "429" in err_msg or "resource_exhausted" in err_msg or "503" in err_msg or "unavailable" in err_msg:
+                    sleep_time = 15.0 * (attempt + 1)
+                    logger.warning(f"Quota/Saturation API au batch {start}-{end}. Pause de {sleep_time}s...")
+                    time.sleep(sleep_time)
+                else:
+                    logger.warning(f"Tentative {attempt+1} échouée pour le batch {start}-{end}: {e}")
+                    time.sleep(1.5 * (attempt + 1))
 
-        # Si la traduction a réussi
+        # Application intelligente des traductions
         if translated_lines and len(translated_lines) > 0:
             for j in range(batch_len):
                 if j < len(translated_lines):
@@ -234,10 +250,14 @@ def gemini_translate(segments, target, source=None, mode="flash"):
     else:
         candidates = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.7-flash"]
 
+    # Prompt système dynamique par langue
+    sys_prompt = get_system_prompt(target)
+
     config_kwargs = {
         "temperature": 0.2,
         "max_output_tokens": 3000,
-        "response_mime_type": "application/json"
+        "response_mime_type": "application/json",
+        "system_instruction": sys_prompt
     }
     
     safety = get_gemini_safety_settings()
@@ -281,11 +301,12 @@ def groq_translate(segments, target, source=None):
         return translate_iterative(segments, target, source)
 
     client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, http_client=httpx.Client(timeout=60))
+    sys_prompt = get_system_prompt(target)
 
     def call_groq(full_prompt, batch_len):
         chat = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": CONTEXT_GOLD_DIGGER_PROMPT},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": full_prompt}
             ],
             model="llama-3.3-70b-versatile",
@@ -306,9 +327,10 @@ def hf_zephyr_translate(segments, target, source=None, batch_size=15):
         return translate_iterative(segments, target, source)
 
     client = InferenceClient(model="HuggingFaceH4/zephyr-7b-beta", token=hf_token)
+    sys_prompt = get_system_prompt(target)
 
     def call_zephyr(full_prompt, batch_len):
-        prompt = f"<|system|>\n{CONTEXT_GOLD_DIGGER_PROMPT}</s>\n<|user|>\n{full_prompt}</s>\n<|assistant|>"
+        prompt = f"<|system|>\n{sys_prompt}</s>\n<|user|>\n{full_prompt}</s>\n<|assistant|>"
         response = client.text_generation(prompt, max_new_tokens=1500, temperature=0.3, return_full_text=False)
         return parse_llm_response(response, batch_len)
 
